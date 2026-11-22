@@ -27,23 +27,31 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.whispercpp.whisper.WhisperContext
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.Locale
 
 class MainActivity : ComponentActivity() {
@@ -62,6 +70,8 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun VoiceTranscriberScreen() {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val modelFile = remember(context) { WhisperModelManager.modelFile(context) }
     var selectedUri by remember { mutableStateOf<Uri?>(null) }
     var selectedName by remember { mutableStateOf<String?>(null) }
     var player by remember { mutableStateOf<MediaPlayer?>(null) }
@@ -69,9 +79,27 @@ private fun VoiceTranscriberScreen() {
     var isPlaying by remember { mutableStateOf(false) }
     var playbackError by remember { mutableStateOf<String?>(null) }
     var durationMs by remember { mutableStateOf(0) }
+    var whisperContext by remember { mutableStateOf<WhisperContext?>(null) }
+    var isLoadingModel by remember { mutableStateOf(false) }
+    var modelProgress by remember { mutableFloatStateOf(0f) }
+    var modelStatus by remember {
+        mutableStateOf(
+            if (modelFile.exists()) "Model downloaded. Load it to prepare offline transcription."
+            else "No model downloaded yet."
+        )
+    }
 
     DisposableEffect(Unit) {
         onDispose { player?.release(); player = null }
+    }
+
+    DisposableEffect(whisperContext) {
+        val contextToRelease = whisperContext
+        onDispose {
+            contextToRelease?.let { loaded ->
+                CoroutineScope(SupervisorJob() + Dispatchers.IO).launch { loaded.release() }
+            }
+        }
     }
 
     val audioPicker = rememberLauncherForActivityResult(
@@ -119,6 +147,73 @@ private fun VoiceTranscriberScreen() {
                         Icon(Icons.Default.FolderOpen, contentDescription = null)
                         Spacer(Modifier.width(8.dp))
                         Text("Browse audio files")
+                    }
+                }
+            }
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("Offline speech model", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "Download the multilingual Whisper tiny model (quantized, approximately 31 MB). " +
+                            "It is stored in this app's private storage and can be reused offline.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (isLoadingModel) {
+                        LinearProgressIndicator(
+                            progress = { modelProgress },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                    Text(modelStatus, style = MaterialTheme.typography.bodySmall)
+                    Button(
+                        onClick = {
+                            scope.launch {
+                                isLoadingModel = true
+                                modelProgress = 0f
+                                try {
+                                    val file = if (modelFile.exists() && modelFile.length() > 1_000_000L) {
+                                        modelFile
+                                    } else {
+                                        WhisperModelManager.download(context) { downloaded, total ->
+                                            withContext(Dispatchers.Main) {
+                                                modelProgress = if (total > 0) {
+                                                    (downloaded.toFloat() / total).coerceIn(0f, 1f)
+                                                } else 0f
+                                                modelStatus = if (total > 0) {
+                                                    "Downloading model: ${(modelProgress * 100).toInt()}%"
+                                                } else {
+                                                    "Downloading model: ${downloaded / (1024 * 1024)} MB"
+                                                }
+                                            }
+                                        }
+                                    }
+                                    modelStatus = "Loading native Whisper model into memory…"
+                                    val loaded = withContext(Dispatchers.IO) {
+                                        WhisperContext.createContextFromFile(file.absolutePath)
+                                    }
+                                    whisperContext = loaded
+                                    modelStatus = "Whisper model loaded. It is ready for offline transcription."
+                                } catch (error: Exception) {
+                                    modelStatus = "Model setup failed: ${error.localizedMessage ?: "Unknown error"}"
+                                } catch (error: LinkageError) {
+                                    modelStatus = "Native Whisper runtime could not load: ${error.localizedMessage ?: "ABI or library error"}"
+                                } finally {
+                                    isLoadingModel = false
+                                }
+                            }
+                        },
+                        enabled = !isLoadingModel && whisperContext == null,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            when {
+                                isLoadingModel -> "Preparing model…"
+                                whisperContext != null -> "Offline model loaded"
+                                modelFile.exists() -> "Load offline model"
+                                else -> "Download and load model"
+                            }
+                        )
                     }
                 }
             }
@@ -187,10 +282,17 @@ private fun VoiceTranscriberScreen() {
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("Transcription", style = MaterialTheme.typography.titleMedium)
-                    Text("Whisper on-device transcription is the next milestone. No audio is uploaded in this version.",
-                        style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text("Status: M0.1 — file selection and playback", style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.primary)
+                    Text(
+                        if (whisperContext != null) {
+                            "The local Whisper runtime and model are loaded. Audio decoding and transcription controls arrive in M0.3."
+                        } else {
+                            "Whisper runs locally on this device. No recording is uploaded; download the model once to use it offline."
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text("Status: M0.2 — native Whisper runtime and model loading",
+                        style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
                 }
             }
             Spacer(Modifier.height(4.dp))
