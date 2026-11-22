@@ -41,7 +41,7 @@ import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.LibraryMusic
 import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.Logout
+import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
@@ -809,7 +809,7 @@ private fun MeetingWorkspaceScreen(
                         )
                     }
                     androidx.compose.material3.IconButton(onClick = onSignOut) {
-                        androidx.compose.material3.Icon(Icons.Default.Logout, contentDescription = "Sign out", tint = Muted)
+                        androidx.compose.material3.Icon(Icons.AutoMirrored.Filled.Logout, contentDescription = "Sign out", tint = Muted)
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = Canvas)
@@ -1550,7 +1550,7 @@ private fun formatDate(value: String): String = try {
     value.take(16).replace('T', ' ')
 }
 
-private fun formatDuration(durationMs: Int): String {
+internal fun formatDuration(durationMs: Int): String {
     val totalSeconds = (durationMs / 1_000).coerceAtLeast(0)
     return String.format(Locale.getDefault(), "%d:%02d", totalSeconds / 60, totalSeconds % 60)
 }
