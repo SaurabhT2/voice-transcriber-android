@@ -15,6 +15,12 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     buildTypes { release { isMinifyEnabled = false } }
+    buildFeatures { buildConfig = true }
+    defaultConfig {
+        buildConfigField("String", "SUPABASE_URL", "\"https://nxkooahxizfbqgrsnvjd.supabase.co\"")
+        buildConfigField("String", "SUPABASE_PUBLISHABLE_KEY", "\"sb_publishable_koyJPGKQ2uWe_wO_KHBQ0A_od49hFdP\"")
+        buildConfigField("String", "API_BASE_URL", "\"https://whisper-platform-api-git-feature-w12-api-cors-saurabhtiwari.vercel.app\"")
+    }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
