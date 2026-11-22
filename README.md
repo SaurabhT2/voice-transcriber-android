@@ -1,30 +1,40 @@
-# Voice Transcriber for Android
+# Meeting Workspace for Android
 
-A privacy-first Android app for selecting audio files stored on the phone, previewing them, and transcribing them locally with Whisper.
+Native Android client for the shared Meeting Workspace.
 
-## Current milestone
+## Product behavior
 
-**M0.3 — Offline transcription implementation in progress**
+Android and web use the same Supabase project, authentication identity, FastAPI backend, private audio bucket, transcription jobs, meetings, transcripts, and meeting notes. Sign in with the same email address on either client to see the same shared meeting history.
 
-- Select and preview audio using Android's Storage Access Framework and platform media codecs.
-- Integrate the upstream `whisper.cpp` Android JNI runtime as a pinned Git submodule.
-- Download the multilingual Whisper tiny Q5_1 model only after the user explicitly requests it.
-- Verify the model SHA-256 before loading it from app-private storage.
-- Decode supported device audio formats to mono 16 kHz float PCM.
-- Transcribe in bounded 30-second chunks, with status updates and cancellation between chunks.
-- Patch the pinned Android JNI bridge to request automatic language detection rather than forcing English.
-- Keep the audio on the phone. Model download is the only network operation.
+The Android client adds two device-native capabilities:
 
-The first model is `ggml-tiny-q5_1.bin` from the `ggerganov/whisper.cpp` Hugging Face repository. It is a compact multilingual model intended as a practical starting point for Android devices. The model is downloaded once; after download, inference works without network access. Actual device compatibility and transcription quality still require a physical-phone test.
+- **Record:** capture a meeting with the phone microphone and save the original audio in app-private storage.
+- **Local transcription:** run the on-device multilingual model using the native Android runtime. The audio remains on the phone; only the completed transcript is synced to the shared workspace.
 
-## Planned milestones
+For recordings that should use the workstation GPU, select **Shared GPU** explicitly. The app creates a job through the same upload API used by the web app, uploads to the same private Supabase bucket using a short-lived signed URL, and polls the same job until a transcript is ready.
 
-- M0.1: File selection and playback — CI verified.
-- M0.2: Native `whisper.cpp` runtime and multilingual model loading — CI build green.
-- M0.3: Decode selected audio to 16 kHz mono PCM, run offline transcription, and expose progress/cancellation — implementation underway.
-- M0.4: Transcript display, copy, TXT and SRT export.
-- M0.5: Long-file, memory and performance testing.
-- M1.x: Optional private workstation/GPU execution path. Local and remote execution remain explicit user choices.
+## Current Android implementation
+
+- Supabase email magic-link sign-in using the shared project.
+- Encrypted session storage backed by Android Keystore.
+- Shared recording history with owner-scoped Supabase reads.
+- Local audio capture with pause, resume and stop.
+- Audio import using Android Storage Access Framework.
+- On-device transcription using the existing pinned whisper.cpp Android runtime.
+- Shared GPU upload, job tracking and transcript retrieval.
+- Offline transcript persistence and idempotent sync through `POST /api/v1/meetings/sync`.
+- Meeting notes retrieval and generation through the shared API.
+- White-label UI: Meeting Workspace; no inference-engine branding is exposed to users.
+
+## Supabase Auth one-time setup
+
+In Supabase Dashboard → Authentication → URL Configuration → Additional Redirect URLs, add:
+
+```text
+meetingworkspace://auth/callback
+```
+
+The web client continues using `https://transcribe.saurabhtiwariai.com`. Android uses the custom URI above so a magic link opened on the phone returns to the app.
 
 ## Build
 
@@ -34,7 +44,7 @@ Clone with the native engine submodule:
 git clone --recurse-submodules https://github.com/SaurabhT2/voice-transcriber-android.git
 ```
 
-Open the project in Android Studio and let Gradle sync.
+Open the project in Android Studio and sync Gradle.
 
 Requirements:
 - JDK 17
@@ -43,16 +53,21 @@ Requirements:
 - CMake 3.22.1
 - Gradle 8.9
 
-The CI workflow installs the required Android SDK, NDK and CMake packages and builds the debug APK. The root Gradle build applies a small, idempotent patch to the pinned upstream Android JNI bridge so Whisper auto-detects the spoken language. The patch is limited to the JNI language setting; review `patches/whisper-android-auto-language.patch` when updating the submodule.
+The Android CI workflow runs unit tests and assembles a debug APK.
 
-## Privacy
+## Local model
 
-- Audio is read only from a URI explicitly selected by the user.
-- Audio is not sent to a cloud transcription provider.
-- The model is stored in app-private storage.
-- The app does not require an account or subscription.
-- The optional future workstation mode will be separately configured and explicitly selected; it will never silently upload audio.
+The compact multilingual model is downloaded only after the user requests local transcription. Model files are stored in app-private storage and verified by SHA-256 before loading. Actual speed and memory use depend on the phone.
 
-## Upstream native engine
+## Privacy and execution choices
 
-The native engine is pinned as a Git submodule at `third_party/whisper.cpp` from [ggml-org/whisper.cpp](https://github.com/ggml-org/whisper.cpp). See the upstream project for its source and license.
+- Local mode does not upload audio. The app syncs transcript text and meeting metadata only.
+- Shared GPU mode requires an explicit user action before audio upload.
+- Audio uploads use a short-lived signed URL to the private `meeting-audio` bucket.
+- Supabase publishable keys are client-safe and are paired with owner-scoped RLS and the user's access token.
+- Service-role keys, worker credentials, and inference secrets never ship in the Android app.
+- There is no mandatory transcription subscription or third-party cloud inference provider.
+
+## Shared backend
+
+The FastAPI contract and Supabase data model are maintained in [whisper-platform-api](https://github.com/SaurabhT2/whisper-platform-api). Android calls the same API version used by the web app.
