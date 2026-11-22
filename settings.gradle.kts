@@ -6,4 +6,5 @@ dependencyResolutionManagement {
     repositories { google(); mavenCentral() }
 }
 rootProject.name = "VoiceTranscriber"
-include(":app")
+include(":app", ":whisperlib")
+project(":whisperlib").projectDir = file("third_party/whisper.cpp/examples/whisper.android/lib")
