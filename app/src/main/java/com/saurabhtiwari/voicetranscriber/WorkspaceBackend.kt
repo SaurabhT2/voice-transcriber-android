@@ -28,9 +28,9 @@ import kotlinx.coroutines.withContext
  * Supabase access token provide authorization. Never place service-role keys here.
  */
 object WorkspaceConfig {
-    const val SUPABASE_URL = "https://nxkooahxizfbqgrsnvjd.supabase.co"
-    const val SUPABASE_PUBLISHABLE_KEY = "sb_publishable_koyJPGKQ2uWe_wO_KHBQ0A_od49hFdP"
-    const val API_BASE_URL = "https://whisper-platform-api-git-feature-w12-api-cors-saurabhtiwari.vercel.app"
+    val SUPABASE_URL = BuildConfig.SUPABASE_URL
+    val SUPABASE_PUBLISHABLE_KEY = BuildConfig.SUPABASE_PUBLISHABLE_KEY
+    val API_BASE_URL = BuildConfig.API_BASE_URL
     const val AUDIO_BUCKET = "meeting-audio"
     const val AUTH_REDIRECT_URI = "meetingworkspace://auth/callback"
 }
