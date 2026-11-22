@@ -431,12 +431,36 @@ class WorkspaceBackend(context: Context) {
         )
     }
 
-    suspend fun generateMeetingNotes(session: UserSession, meetingId: String): JSONObject = withContext(Dispatchers.IO) {
+    suspend fun generateMeetingNotes(
+        session: UserSession,
+        meetingId: String,
+        regenerate: Boolean = false
+    ): JSONObject = withContext(Dispatchers.IO) {
         requestJson(
             "POST",
             WorkspaceConfig.API_BASE_URL + "/api/v1/meetings/" + meetingId + "/notes",
             bearerToken = session.accessToken,
-            body = JSONObject()
+            body = JSONObject().put("regenerate", regenerate)
+        )
+    }
+
+    suspend fun getMeetingNotesStatus(session: UserSession, meetingId: String): JSONObject = withContext(Dispatchers.IO) {
+        requestJson(
+            "GET",
+            WorkspaceConfig.API_BASE_URL + "/api/v1/meetings/" + meetingId + "/notes/status",
+            bearerToken = session.accessToken
+        )
+    }
+
+    suspend fun getMeetingNotesJob(
+        session: UserSession,
+        meetingId: String,
+        jobId: String
+    ): JSONObject = withContext(Dispatchers.IO) {
+        requestJson(
+            "GET",
+            WorkspaceConfig.API_BASE_URL + "/api/v1/meetings/" + meetingId + "/notes/jobs/" + jobId,
+            bearerToken = session.accessToken
         )
     }
 
