@@ -194,6 +194,7 @@ class WorkspaceBackend(context: Context) {
         val user = requestJson(
             "GET",
             WorkspaceConfig.SUPABASE_URL + "/auth/v1/user",
+            headers = mapOf("apikey" to WorkspaceConfig.SUPABASE_PUBLISHABLE_KEY),
             bearerToken = accessToken
         )
         val session = UserSession(
@@ -211,21 +212,9 @@ class WorkspaceBackend(context: Context) {
         val current = sessionStore.load() ?: return@withContext null
         val now = System.currentTimeMillis() / 1000L
         if (current.expiresAtEpochSeconds > now + 90L) {
-            try {
-                val user = requestJson(
-                    "GET",
-                    WorkspaceConfig.SUPABASE_URL + "/auth/v1/user",
-                    bearerToken = current.accessToken
-                )
-                val refreshed = current.copy(
-                    userId = user.getString("id"),
-                    email = user.optString("email")
-                )
-                sessionStore.save(refreshed)
-                return@withContext refreshed
-            } catch (_: Exception) {
-                // Attempt refresh below when the current access token is no longer accepted.
-            }
+            // The signed-in API validates the token. Keep the saved session usable offline
+            // instead of forcing a sign-in just because this device has no network.
+            return@withContext current
         }
         refreshSession(current)
     }
@@ -251,6 +240,7 @@ class WorkspaceBackend(context: Context) {
             val user = requestJson(
                 "GET",
                 WorkspaceConfig.SUPABASE_URL + "/auth/v1/user",
+                headers = mapOf("apikey" to WorkspaceConfig.SUPABASE_PUBLISHABLE_KEY),
                 bearerToken = accessToken
             )
             UserSession(
