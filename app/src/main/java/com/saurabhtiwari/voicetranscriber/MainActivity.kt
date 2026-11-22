@@ -393,6 +393,23 @@ private fun MeetingWorkspaceScreen(
         historyLoading = true
         historyError = ""
         try {
+            // Retry locally completed transcripts whenever history is refreshed.
+            localStore.pendingSync().forEach { record ->
+                try {
+                    val meetingId = backend.syncOfflineTranscript(
+                        session = session,
+                        eventId = record.eventId,
+                        title = record.title,
+                        startedAt = record.startedAt,
+                        endedAt = record.endedAt,
+                        transcript = record.transcript,
+                        language = record.language
+                    )
+                    localStore.markSynced(record.eventId, meetingId)
+                } catch (_: Exception) {
+                    // Preserve the local transcript and try again on the next refresh.
+                }
+            }
             val remote = backend.loadRecordings(session)
             val localOnly = localStore.pendingSync().map { record ->
                 RecordingItem(
@@ -455,7 +472,7 @@ private fun MeetingWorkspaceScreen(
         }
     }
 
-    DisposableEffect(Unit) {
+    DisposableEffect(isRecording, whisperContext) {
         onDispose {
             if (isRecording) recorder.release()
             val modelToRelease = whisperContext
