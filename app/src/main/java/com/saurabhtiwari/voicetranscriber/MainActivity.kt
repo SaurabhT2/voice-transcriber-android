@@ -112,6 +112,9 @@ private fun VoiceTranscriberScreen() {
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
         if (uri != null) {
+            transcriptionJob?.cancel()
+            transcriptionJob = null
+            isTranscribing = false
             try {
                 context.contentResolver.takePersistableUriPermission(
                     uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
