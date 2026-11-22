@@ -17,6 +17,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -1362,7 +1363,7 @@ private fun RecordingRow(item: RecordingItem, onClick: () -> Unit) {
             Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(5.dp)) {
                 StatusPill(if (item.isLocalOnly) "local" else item.status)
                 if (item.status == "succeeded" || item.isLocalOnly) {
-                    OutlinedButton(onClick = onClick, contentPadding = ButtonDefaults.TextButtonContentPadding) {
+                    OutlinedButton(onClick = onClick) {
                         Text("Open")
                     }
                 }
@@ -1420,7 +1421,7 @@ private fun StatCard(label: String, value: String, icon: androidx.compose.ui.gra
 }
 
 @Composable
-private fun WorkspaceCard(content: @Composable Column.() -> Unit) {
+private fun WorkspaceCard(content: @Composable ColumnScope.() -> Unit) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(13.dp),
