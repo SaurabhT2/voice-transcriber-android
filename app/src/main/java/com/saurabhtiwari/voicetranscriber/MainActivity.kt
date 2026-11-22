@@ -78,6 +78,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -472,11 +473,13 @@ private fun MeetingWorkspaceScreen(
         }
     }
 
-    DisposableEffect(isRecording, whisperContext) {
+    val latestIsRecording by rememberUpdatedState(isRecording)
+    val latestWhisperContext by rememberUpdatedState(whisperContext)
+
+    DisposableEffect(recorder) {
         onDispose {
-            if (isRecording) recorder.release()
-            val modelToRelease = whisperContext
-            modelToRelease?.let { loaded ->
+            if (latestIsRecording) recorder.release()
+            latestWhisperContext?.let { loaded ->
                 CoroutineScope(SupervisorJob() + Dispatchers.IO).launch { loaded.release() }
             }
         }
