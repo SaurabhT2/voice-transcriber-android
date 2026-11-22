@@ -6,6 +6,8 @@ import org.json.JSONObject
 import java.io.File
 import java.time.Instant
 import java.util.UUID
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 data class LocalMeetingRecord(
     val eventId: String,
@@ -164,7 +166,7 @@ suspend fun copyRecordingToCache(context: Context, uri: Uri, suggestedName: Stri
     val directory = File(context.cacheDir, "upload_staging").apply { mkdirs() }
     val safeName = suggestedName.replace(Regex("[^A-Za-z0-9._-]"), "_").take(180)
     val destination = File(directory, System.currentTimeMillis().toString() + "_" + safeName)
-    with(kotlinx.coroutines.Dispatchers.IO) {
+    withContext(Dispatchers.IO) {
         context.contentResolver.openInputStream(uri)?.use { input ->
             destination.outputStream().buffered().use { output -> input.copyTo(output) }
         } ?: throw java.io.IOException("Android could not read the selected audio file.")
