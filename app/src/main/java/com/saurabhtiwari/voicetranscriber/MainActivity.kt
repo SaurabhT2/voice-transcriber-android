@@ -48,7 +48,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.whispercpp.whisper.WhisperContext
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -88,6 +90,10 @@ private fun VoiceTranscriberScreen() {
             else "No model downloaded yet."
         )
     }
+    var isTranscribing by remember { mutableStateOf(false) }
+    var transcriptionStatus by remember { mutableStateOf("Select audio and load the model to begin.") }
+    var transcript by remember { mutableStateOf("") }
+    var transcriptionJob by remember { mutableStateOf<Job?>(null) }
 
     DisposableEffect(Unit) {
         onDispose { player?.release(); player = null }
@@ -121,6 +127,8 @@ private fun VoiceTranscriberScreen() {
             isPlaying = false
             durationMs = 0
             playbackError = null
+            transcript = ""
+            transcriptionStatus = "Audio selected. Load the model to transcribe offline."
         }
     }
 
@@ -276,18 +284,85 @@ private fun VoiceTranscriberScreen() {
                 }
             }
             Card(modifier = Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Transcription", style = MaterialTheme.typography.titleMedium)
+                Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("On-device transcription", style = MaterialTheme.typography.titleMedium)
                     Text(
-                        if (whisperContext != null) {
-                            "The local Whisper runtime and model are loaded. Audio decoding and transcription controls arrive in M0.3."
-                        } else {
-                            "Whisper runs locally on this device. No recording is uploaded; download the model once to use it offline."
-                        },
+                        "Audio is decoded on the phone into mono 16 kHz PCM and processed in 30-second chunks. " +
+                            "Whisper automatically detects the spoken language. No audio leaves this device.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    Text("Status: M0.2 — native Whisper runtime and model loading",
+                    Button(
+                        onClick = {
+                            if (isTranscribing) {
+                                transcriptionJob?.cancel()
+                            } else {
+                                val uri = selectedUri ?: return@Button
+                                val engine = whisperContext ?: return@Button
+                                transcript = ""
+                                isTranscribing = true
+                                transcriptionStatus = "Preparing audio decoder…"
+                                transcriptionJob = scope.launch {
+                                    try {
+                                        var chunkIndex = 0
+                                        AndroidAudioDecoder.decodeToChunks(
+                                            context = context,
+                                            uri = uri,
+                                            onDuration = { decodedDuration ->
+                                                withContext(Dispatchers.Main) {
+                                                    if (decodedDuration > 0) durationMs = decodedDuration.toInt()
+                                                }
+                                            },
+                                            onChunk = { samples, offsetSeconds ->
+                                                chunkIndex += 1
+                                                withContext(Dispatchers.Main) {
+                                                    transcriptionStatus =
+                                                        "Transcribing audio chunk $chunkIndex (around ${offsetSeconds}s)…"
+                                                }
+                                                val recognized = engine.transcribeData(
+                                                    samples,
+                                                    printTimestamp = false
+                                                ).trim()
+                                                if (recognized.isNotBlank()) {
+                                                    withContext(Dispatchers.Main) {
+                                                        transcript = listOf(transcript, recognized)
+                                                            .filter { it.isNotBlank() }
+                                                            .joinToString(" ")
+                                                    }
+                                                }
+                                            }
+                                        )
+                                        transcriptionStatus = if (transcript.isBlank()) {
+                                            "Processing complete. No speech was detected."
+                                        } else {
+                                            "Transcription complete — $chunkIndex audio chunk(s) processed."
+                                        }
+                                    } catch (cancelled: CancellationException) {
+                                        transcriptionStatus = "Transcription cancelled."
+                                        throw cancelled
+                                    } catch (error: Exception) {
+                                        transcriptionStatus =
+                                            "Transcription failed: ${error.localizedMessage ?: "Unsupported or unreadable audio"}"
+                                    } finally {
+                                        isTranscribing = false
+                                        transcriptionJob = null
+                                    }
+                                }
+                            }
+                        },
+                        enabled = isTranscribing || (selectedUri != null && whisperContext != null),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(if (isTranscribing) "Cancel transcription" else "Transcribe offline")
+                    }
+                    Text(transcriptionStatus, style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (isTranscribing) LinearProgressIndicator(Modifier.fillMaxWidth())
+                    if (transcript.isNotBlank()) {
+                        Text("Transcript", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                        Text(transcript, style = MaterialTheme.typography.bodyMedium)
+                    }
+                    Text("Status: M0.3 — offline transcription",
                         style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
                 }
             }
