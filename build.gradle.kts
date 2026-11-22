@@ -9,8 +9,6 @@ val patchWhisperAutoLanguage = tasks.register("patchWhisperAutoLanguage") {
     val nativeBridge = layout.projectDirectory.file(
         "third_party/whisper.cpp/examples/whisper.android/lib/src/main/jni/whisper/jni.c"
     )
-    inputs.file(nativeBridge)
-    outputs.file(nativeBridge)
     doLast {
         val file = nativeBridge.asFile
         check(file.isFile) { "Whisper Android JNI source is missing. Clone with --recurse-submodules." }
