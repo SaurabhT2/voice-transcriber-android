@@ -11,6 +11,7 @@ import kotlinx.coroutines.withContext
 
 data class LocalMeetingRecord(
     val eventId: String,
+    val ownerId: String,
     val title: String,
     val transcript: String,
     val createdAt: String,
@@ -25,14 +26,17 @@ class LocalMeetingStore(context: Context) {
 
     @Synchronized
     fun save(
+        ownerId: String,
         title: String,
         transcript: String,
         startedAt: String,
         endedAt: String,
         language: String?
     ): LocalMeetingRecord {
+        require(ownerId.isNotBlank()) { "A signed-in owner is required to save a local transcript." }
         val record = LocalMeetingRecord(
             eventId = UUID.randomUUID().toString(),
+            ownerId = ownerId,
             title = title,
             transcript = transcript,
             createdAt = Instant.now().toString(),
@@ -46,7 +50,7 @@ class LocalMeetingStore(context: Context) {
     }
 
     @Synchronized
-    fun list(): List<LocalMeetingRecord> =
+    fun list(ownerId: String): List<LocalMeetingRecord> =
         directory.listFiles { file -> file.isFile && file.extension == "json" }
             .orEmpty()
             .mapNotNull { file ->
@@ -54,6 +58,7 @@ class LocalMeetingStore(context: Context) {
                     val json = JSONObject(file.readText())
                     LocalMeetingRecord(
                         eventId = json.getString("event_id"),
+                        ownerId = json.getString("owner_id"),
                         title = json.optString("title", "Local recording"),
                         transcript = json.optString("transcript"),
                         createdAt = json.optString("created_at"),
@@ -66,19 +71,22 @@ class LocalMeetingStore(context: Context) {
                     null
                 }
             }
+            .filter { it.ownerId == ownerId }
             .sortedByDescending { it.createdAt }
 
     @Synchronized
-    fun markSynced(eventId: String, meetingId: String) {
-        val existing = list().firstOrNull { it.eventId == eventId } ?: return
+    fun markSynced(ownerId: String, eventId: String, meetingId: String) {
+        val existing = list(ownerId).firstOrNull { it.eventId == eventId } ?: return
         write(existing.copy(meetingId = meetingId))
     }
 
-    fun pendingSync(): List<LocalMeetingRecord> = list().filter { it.meetingId == null }
+    fun pendingSync(ownerId: String): List<LocalMeetingRecord> =
+        list(ownerId).filter { it.meetingId == null }
 
     private fun write(record: LocalMeetingRecord) {
         val json = JSONObject()
             .put("event_id", record.eventId)
+            .put("owner_id", record.ownerId)
             .put("title", record.title)
             .put("transcript", record.transcript)
             .put("created_at", record.createdAt)
