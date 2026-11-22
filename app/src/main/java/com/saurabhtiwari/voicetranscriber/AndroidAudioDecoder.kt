@@ -25,7 +25,7 @@ object AndroidAudioDecoder {
     suspend fun decodeToChunks(
         context: Context,
         uri: Uri,
-        onDuration: (Long) -> Unit,
+        onDuration: suspend (Long) -> Unit,
         onChunk: suspend (samples: FloatArray, offsetSeconds: Long) -> Unit
     ) = withContext(Dispatchers.IO) {
         val coroutine = currentCoroutineContext()
