@@ -10,8 +10,8 @@ android {
         applicationId = "com.saurabhtiwari.voicetranscriber"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "0.2.0"
+        versionCode = 3
+        versionName = "1.0.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "SUPABASE_URL", "\"https://nxkooahxizfbqgrsnvjd.supabase.co\"")
         buildConfigField("String", "SUPABASE_PUBLISHABLE_KEY", "\"sb_publishable_koyJPGKQ2uWe_wO_KHBQ0A_od49hFdP\"")
