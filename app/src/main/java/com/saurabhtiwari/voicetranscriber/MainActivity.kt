@@ -396,7 +396,7 @@ private fun MeetingWorkspaceScreen(
         historyError = ""
         try {
             // Retry locally completed transcripts whenever history is refreshed.
-            localStore.pendingSync().forEach { record ->
+            localStore.pendingSync(session.userId).forEach { record ->
                 try {
                     val meetingId = backend.syncOfflineTranscript(
                         session = session,
@@ -407,13 +407,13 @@ private fun MeetingWorkspaceScreen(
                         transcript = record.transcript,
                         language = record.language
                     )
-                    localStore.markSynced(record.eventId, meetingId)
+                    localStore.markSynced(session.userId, record.eventId, meetingId)
                 } catch (_: Exception) {
                     // Preserve the local transcript and try again on the next refresh.
                 }
             }
             val remote = backend.loadRecordings(session)
-            val localOnly = localStore.pendingSync().map { record ->
+            val localOnly = localStore.pendingSync(session.userId).map { record ->
                 RecordingItem(
                     id = record.eventId,
                     title = record.title,
@@ -428,7 +428,7 @@ private fun MeetingWorkspaceScreen(
             history = (remote + localOnly).sortedByDescending { it.createdAt }
         } catch (error: Exception) {
             historyError = error.message ?: "Unable to refresh recordings."
-            val localOnly = localStore.list().mapNotNull { record ->
+            val localOnly = localStore.list(session.userId).mapNotNull { record ->
                 if (record.meetingId != null) null
                 else RecordingItem(
                     id = record.eventId,
@@ -448,7 +448,7 @@ private fun MeetingWorkspaceScreen(
     }
 
     LaunchedEffect(session.userId) {
-        localStore.pendingSync().forEach { record ->
+        localStore.pendingSync(session.userId).forEach { record ->
             try {
                 val meetingId = backend.syncOfflineTranscript(
                     session = session,
@@ -459,7 +459,7 @@ private fun MeetingWorkspaceScreen(
                     transcript = record.transcript,
                     language = record.language
                 )
-                localStore.markSynced(record.eventId, meetingId)
+                localStore.markSynced(session.userId, record.eventId, meetingId)
             } catch (_: Exception) {
                 // Keep the device copy and retry on a later app launch or explicit refresh.
             }
@@ -634,6 +634,7 @@ private fun MeetingWorkspaceScreen(
                 } else {
                     val endedAt = Instant.now().toString()
                     val saved = localStore.save(
+                        ownerId = session.userId,
                         title = selectedName.ifBlank { "Local recording" },
                         transcript = transcriptText,
                         startedAt = selectedStartedAt,
@@ -653,7 +654,7 @@ private fun MeetingWorkspaceScreen(
                             transcript = saved.transcript,
                             language = saved.language
                         )
-                        localStore.markSynced(saved.eventId, meetingId)
+                        localStore.markSynced(session.userId, saved.eventId, meetingId)
                         currentMeeting = backend.getMeeting(session, meetingId)
                         currentLocalRecord = null
                         transcriptionStatus = "Transcription complete. Transcript synced to your workspace."
@@ -735,7 +736,7 @@ private fun MeetingWorkspaceScreen(
 
     fun openRecording(item: RecordingItem) {
         if (item.isLocalOnly) {
-            currentLocalRecord = localStore.list().firstOrNull { it.eventId == item.id }
+            currentLocalRecord = localStore.list(session.userId).firstOrNull { it.eventId == item.id }
             currentMeeting = null
             meetingNotes = null
             tab = WorkspaceTab.HISTORY
