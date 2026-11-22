@@ -172,19 +172,15 @@ private fun VoiceTranscriberScreen() {
                                 isLoadingModel = true
                                 modelProgress = 0f
                                 try {
-                                    val file = if (modelFile.exists() && modelFile.length() > 1_000_000L) {
-                                        modelFile
-                                    } else {
-                                        WhisperModelManager.download(context) { downloaded, total ->
-                                            withContext(Dispatchers.Main) {
-                                                modelProgress = if (total > 0) {
-                                                    (downloaded.toFloat() / total).coerceIn(0f, 1f)
-                                                } else 0f
-                                                modelStatus = if (total > 0) {
-                                                    "Downloading model: ${(modelProgress * 100).toInt()}%"
-                                                } else {
-                                                    "Downloading model: ${downloaded / (1024 * 1024)} MB"
-                                                }
+                                    val file = WhisperModelManager.download(context) { downloaded, total ->
+                                        withContext(Dispatchers.Main) {
+                                            modelProgress = if (total > 0) {
+                                                (downloaded.toFloat() / total).coerceIn(0f, 1f)
+                                            } else 0f
+                                            modelStatus = if (total > 0) {
+                                                "Downloading model: ${(modelProgress * 100).toInt()}%"
+                                            } else {
+                                                "Downloading model: ${downloaded / (1024 * 1024)} MB"
                                             }
                                         }
                                     }
