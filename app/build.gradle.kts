@@ -23,6 +23,7 @@ android {
 }
 dependencies {
     implementation(project(":whisperlib"))
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.2")
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.activity:activity-compose:1.10.0")
     val composeBom = platform("androidx.compose:compose-bom:2024.12.01")
