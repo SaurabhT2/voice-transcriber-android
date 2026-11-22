@@ -1,0 +1,6 @@
+--- a/examples/whisper.android/lib/src/main/jni/whisper/jni.c
++++ b/examples/whisper.android/lib/src/main/jni/whisper/jni.c
+@@
+-    params.language = "en";
++    // Let Whisper detect the spoken language instead of forcing English.
++    params.language = "auto";
