@@ -740,6 +740,7 @@ private fun MeetingWorkspaceScreen(
             currentLocalRecord = localStore.list(session.userId).firstOrNull { it.eventId == item.id }
             currentMeeting = null
             meetingNotes = null
+            meetingNotesStatus = ""
             tab = WorkspaceTab.HISTORY
             return
         }
