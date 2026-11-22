@@ -4,22 +4,24 @@ A privacy-first Android app for selecting audio files stored on the phone, previ
 
 ## Current milestone
 
-**M0.2 — Native Whisper runtime and offline model loading**
+**M0.3 — Offline transcription implementation in progress**
 
-- Select an audio file using Android's Storage Access Framework.
-- Preview audio with Android's media decoder.
+- Select and preview audio using Android's Storage Access Framework and platform media codecs.
 - Integrate the upstream `whisper.cpp` Android JNI runtime as a pinned Git submodule.
 - Download the multilingual Whisper tiny Q5_1 model only after the user explicitly requests it.
-- Store the model in app-private storage and load it into the native runtime.
-- No audio is uploaded. Model download is the only network operation in this milestone.
+- Verify the model SHA-256 before loading it from app-private storage.
+- Decode supported device audio formats to mono 16 kHz float PCM.
+- Transcribe in bounded 30-second chunks, with status updates and cancellation between chunks.
+- Patch the pinned Android JNI bridge to request automatic language detection rather than forcing English.
+- Keep the audio on the phone. Model download is the only network operation.
 
-The first model is `ggml-tiny-q5_1.bin` from the `ggerganov/whisper.cpp` Hugging Face repository. It is a compact multilingual model intended as a practical starting point for Android devices. The model is downloaded once; after download, loading it does not require network access.
+The first model is `ggml-tiny-q5_1.bin` from the `ggerganov/whisper.cpp` Hugging Face repository. It is a compact multilingual model intended as a practical starting point for Android devices. The model is downloaded once; after download, inference works without network access. Actual device compatibility and transcription quality still require a physical-phone test.
 
 ## Planned milestones
 
 - M0.1: File selection and playback — CI verified.
-- M0.2: Native `whisper.cpp` runtime and multilingual model loading.
-- M0.3: Decode selected audio to 16 kHz mono PCM, run offline transcription, and expose progress/cancellation.
+- M0.2: Native `whisper.cpp` runtime and multilingual model loading — CI build green.
+- M0.3: Decode selected audio to 16 kHz mono PCM, run offline transcription, and expose progress/cancellation — implementation underway.
 - M0.4: Transcript display, copy, TXT and SRT export.
 - M0.5: Long-file, memory and performance testing.
 - M1.x: Optional private workstation/GPU execution path. Local and remote execution remain explicit user choices.
@@ -41,7 +43,7 @@ Requirements:
 - CMake 3.22.1
 - Gradle 8.9
 
-The CI workflow installs the required Android SDK, NDK and CMake packages and builds the debug APK.
+The CI workflow installs the required Android SDK, NDK and CMake packages and builds the debug APK. The root Gradle build applies a small, idempotent patch to the pinned upstream Android JNI bridge so Whisper auto-detects the spoken language. The patch is limited to the JNI language setting; review `patches/whisper-android-auto-language.patch` when updating the submodule.
 
 ## Privacy
 
