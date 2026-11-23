@@ -10,12 +10,12 @@ android {
         applicationId = "com.saurabhtiwari.voicetranscriber"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "1.0.0"
+        versionCode = 4
+        versionName = "1.0.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "SUPABASE_URL", "\"https://nxkooahxizfbqgrsnvjd.supabase.co\"")
         buildConfigField("String", "SUPABASE_PUBLISHABLE_KEY", "\"sb_publishable_koyJPGKQ2uWe_wO_KHBQ0A_od49hFdP\"")
-        buildConfigField("String", "API_BASE_URL", "\"https://whisper-platform-api-git-feature-m2-unifie-59cc65-saurabhtiwari.vercel.app\"")
+        buildConfigField("String", "API_BASE_URL", "\"https://whisper-platform-api-3820e8wie-saurabhtiwari.vercel.app\"")
     }
     buildTypes { release { isMinifyEnabled = false } }
     buildFeatures { buildConfig = true }
