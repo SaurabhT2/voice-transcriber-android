@@ -10,11 +10,15 @@ android {
         applicationId = "com.saurabhtiwari.voicetranscriber"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 3
+        versionName = "1.0.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        buildConfigField("String", "SUPABASE_URL", "\"https://nxkooahxizfbqgrsnvjd.supabase.co\"")
+        buildConfigField("String", "SUPABASE_PUBLISHABLE_KEY", "\"sb_publishable_koyJPGKQ2uWe_wO_KHBQ0A_od49hFdP\"")
+        buildConfigField("String", "API_BASE_URL", "\"https://whisper-platform-api-git-feature-m2-unifie-59cc65-saurabhtiwari.vercel.app\"")
     }
     buildTypes { release { isMinifyEnabled = false } }
+    buildFeatures { buildConfig = true }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -22,6 +26,8 @@ android {
     kotlinOptions { jvmTarget = "17" }
 }
 dependencies {
+    implementation(project(":whisperlib"))
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.2")
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.activity:activity-compose:1.10.0")
     val composeBom = platform("androidx.compose:compose-bom:2024.12.01")

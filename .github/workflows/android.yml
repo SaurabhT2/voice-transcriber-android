@@ -2,7 +2,7 @@ name: Android CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, "feature/**"]
   pull_request:
     branches: [main]
 
@@ -14,6 +14,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -25,8 +27,8 @@ jobs:
         with:
           # The legacy "tools" SDK package is retired and makes sdkmanager fail.
           packages: "platform-tools"
-      - name: Install Android SDK platform
-        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+      - name: Install Android SDK, NDK and CMake
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;25.2.9519653" "cmake;3.22.1"
       - name: Run unit tests
         run: gradle testDebugUnitTest
       - name: Assemble debug APK
@@ -34,6 +36,6 @@ jobs:
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: voice-transcriber-debug
+          name: meeting-workspace-android-debug
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error

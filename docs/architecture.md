@@ -1,175 +1,110 @@
-# Voice Transcriber — Dual-Execution Architecture
+# Meeting Workspace — Shared Backend and Dual Transcription Architecture
 
-## Product decision
+## Product contract
 
-One Android application supports two execution modes:
+The Android and web apps are two clients of one Meeting Workspace. They share:
 
-1. **On-device mode** — private, offline transcription using an Android-compatible Whisper runtime.
-2. **My GPU mode** — submit recordings to the user's own workstation running the existing Python/faster-whisper utility.
+- Supabase Auth users and sessions.
+- Supabase project and private `meeting-audio` bucket.
+- FastAPI API base and versioned endpoint contract.
+- Transcription jobs, meetings, transcript records and meeting artifacts.
+- Owner-scoped access enforced by Supabase RLS and the FastAPI bearer-token dependency.
+- Visual language, navigation concepts, status labels and transcript/notes terminology.
 
-The Android app owns recording, file selection, playback, job status, transcript viewing, history, and export. The workstation is a private inference service, not a second user-facing application.
+The web client provides browser upload and recording. Android adds native recording and an explicit on-device transcription path.
 
-## High-level topology
+## Execution modes
 
-```text
-                         Android application
-      Recording | Import | Playback | History | Transcript | Export
-                                  |
-                       Transcription coordinator
-                         /                  \
-                Local engine             Remote client
-              whisper.cpp/NDK          HTTPS + job API
-                   |                        |
-             Phone CPU/GPU          Private connectivity
-                                      /           \
-                              LAN endpoint      Tailscale
-                                      \           /
-                                    GPU API
-                                       |
-                              FastAPI service layer
-                                       |
-                           Job queue + job workspace
-                                       |
-                         Existing Python engine adapter
-                                       |
-                     faster-whisper / CTranslate2 / CUDA
-                                       |
-                              Transcript + metadata
-```
+1. **Local on device** — use the Android `whisper.cpp` runtime and a compact multilingual model. Audio stays in app-private storage. Once a transcript is complete, Android syncs transcript text and metadata to the shared backend using `POST /api/v1/meetings/sync`. It does not upload the audio.
+2. **Shared GPU** — upload audio after explicit user selection. Android creates a job through `POST /api/v1/transcriptions/upload`, uploads through the returned short-lived signed URL to the same private Supabase bucket used by the web client, calls `complete-upload`, and polls the same job endpoint. The existing workstation worker runs faster-whisper and persists the transcript and segments.
 
-## Connectivity: local network and away from home
+No silent fallback is allowed between Local and Shared GPU because that would change where the audio is processed.
 
-Use two configured routes to the same workstation service:
-
-- **LAN route:** private workstation address/hostname on the trusted home/office network, protected by HTTPS and device authentication.
-- **Remote route:** private Tailscale network using the workstation's tailnet HTTPS name. Use Tailscale Serve as the private HTTPS ingress.
-
-The Android remote client maintains an endpoint profile for each route. It checks health, prefers the LAN route when reachable, and falls back to the Tailscale route. It must never fall back to a public, unauthenticated endpoint.
-
-Do not configure router port forwarding or expose the GPU API directly to the public internet. Tailscale access should be restricted by tailnet ACLs to the user's phone and workstation. The API also requires its own revocable device token. Keep secrets in Android Keystore.
-
-For LAN HTTPS, use a certificate trusted or explicitly pinned by the Android app. Do not disable TLS certificate validation or enable unrestricted cleartext traffic.
-
-If LAN certificate setup proves too operationally expensive, the first remote milestone may use the Tailscale HTTPS endpoint for both same-network and off-network access; direct LAN routing can then be optimized without changing the API contract.
-
-## Android application modules
-
-Suggested package boundaries:
-
-- `ui/`: Compose screens and view models.
-- `domain/`: transcription request, mode, job, segment, and result models.
-- `data/local/`: selected content URI handling, local model management, local inference adapter.
-- `data/remote/`: API client, endpoint health checks, upload and job polling.
-- `data/history/`: local persistence for jobs and transcript metadata.
-- `orchestration/`: selects local or remote engine and normalizes results.
-- `export/`: TXT, SRT, and JSON export.
-
-Define a common engine boundary, for example:
-
-```kotlin
-interface TranscriptionEngine {
-    suspend fun transcribe(
-        input: AudioInput,
-        options: TranscriptionOptions,
-        onProgress: (TranscriptionProgress) -> Unit
-    ): TranscriptionResult
-}
-```
-
-The local and remote engines implement the same domain contract. The UI should not know which engine produced the transcript.
-
-### Local inference
-
-- Integrate whisper.cpp through Android NDK/JNI.
-- Start with a quantized multilingual model sized for practical phone memory and latency; do not target large-v3 as the default phone model.
-- Download model files only after explicit user choice, show storage requirements, and retain an offline-ready model.
-- Keep audio on the phone in local mode.
-- Support cancellation, progress, and safe handling of long recordings.
-
-### Remote inference
-
-- Upload the selected audio to the user's workstation.
-- Run the existing faster-whisper implementation and preserve its language detection, VAD, beam size, CUDA/CPU fallback, timestamps, and metadata.
-- Return normalized transcript segments and run metadata to Android.
-- Keep model weights and audio processing on the workstation; no third-party cloud inference is involved.
-
-## Workstation service
-
-Add a separate service layer around the existing Python package. Do not rewrite the transcription engine.
-
-Suggested layout:
+## Shared service topology
 
 ```text
-server/
-  app/
-    main.py                 # FastAPI application
-    auth.py                 # device-token authentication
-    schemas.py              # request/response contracts
-    jobs.py                 # job lifecycle and queue
-    worker.py               # calls existing engine
-    storage.py              # temporary audio and result storage
-  tests/
-  requirements-server.txt
+Android app                         Web app
+  |                                    |
+  | Supabase Auth                      | Supabase Auth
+  |                                    |
+  +----------------+-------------------+
+                   |
+             Supabase project
+        Auth | Postgres | Private Storage
+                   |
+            Shared FastAPI API
+          /                     \
+   Android offline sync       Upload/job APIs
+   meeting notes              meeting detail
+          \                     /
+               Supabase data
+                    |
+          Persistent GPU worker
+          existing faster-whisper
+                    |
+            Transcript + segments
 ```
 
-The service should call the existing modules for environment validation, device selection, transcription, and output generation. The current CLI remains usable independently.
+## Shared API contract
 
-Initially run one GPU transcription job at a time. Queue additional jobs; do not load multiple large-v3 models concurrently. Store job state and results on the workstation, with configurable retention and explicit cleanup.
+Base prefix: `/api/v1`. All protected endpoints require `Authorization: Bearer <Supabase access token>`.
 
-## Initial API contract
-
-All endpoints are versioned under `/v1` and require authentication except where explicitly exposed only to the private ingress.
-
-| Method | Endpoint | Purpose |
+| Method | Endpoint | Android/web use |
 |---|---|---|
-| GET | `/v1/health` | Service readiness, GPU availability, model readiness |
-| POST | `/v1/jobs` | Upload audio and create a transcription job |
-| GET | `/v1/jobs/{job_id}` | Read queued/running/completed/failed/cancelled status |
-| GET | `/v1/jobs/{job_id}/result` | Retrieve transcript segments and metadata |
-| DELETE | `/v1/jobs/{job_id}` | Request cancellation |
+| GET | `/api/v1/meta` | Discover backend identity/capabilities |
+| GET | `/api/v1/providers` | Discover inference providers |
+| GET | `/api/v1/me` | Verify caller identity |
+| POST | `/api/v1/transcriptions/upload` | Create an upload-pending job and signed URL |
+| POST | `/api/v1/transcriptions/{job_id}/complete-upload` | Verify object and enqueue |
+| GET | `/api/v1/transcriptions/{job_id}` | Poll job status |
+| POST | `/api/v1/transcriptions/{job_id}/cancel` | Cancel eligible jobs |
+| POST | `/api/v1/meetings/sync` | Idempotently sync an on-device transcript |
+| GET | `/api/v1/meetings/{meeting_id}` | Read transcript, segments and speakers |
+| GET/POST | `/api/v1/meetings/{meeting_id}/notes` | Read/generate meeting notes |
 
-Job creation accepts audio plus options such as model, language, beam size, and VAD. The response returns a job ID. Job status includes progress, stage, timestamps, and a safe error message. Result segments use start/end seconds and text, matching the current Python `Segment` model.
+The current web client reads the shared job and meeting lists from Supabase Data API using the same publishable key, signed-in access token and owner-scoped RLS policies. Android follows the same read path for cross-device history. Transcript detail and notes are read through the FastAPI contract.
 
-Add resumable/chunked uploads, server-sent progress, and background retry after the basic job API is reliable. Do not keep an HTTP request open for the duration of inference.
+## Authentication
 
-## Security and privacy requirements
+- Use the same Supabase project as the web app.
+- Magic-link sign-in uses the same email identity.
+- Android receives the verified session on `meetingworkspace://auth/callback`.
+- Add this URI to Supabase Authentication → URL Configuration → Additional Redirect URLs.
+- Access/refresh tokens are stored encrypted using Android Keystore.
+- The Android client includes only the project URL and publishable key. Never include service-role keys or worker secrets.
 
-- No public port forwarding and no anonymous API access.
-- Tailscale ACLs restrict which devices can reach the workstation.
-- Per-device revocable bearer tokens; store tokens in Android Keystore.
-- HTTPS on both LAN and tailnet paths; certificate pinning/trust configured deliberately.
-- Validate file size, extension, MIME type, and job ownership.
-- Generate server-side job IDs and use non-guessable identifiers.
-- Temporary audio and transcript retention is configurable; default to deletion after a short retention window once the app has retrieved the result.
-- Do not log transcript text, bearer tokens, or raw audio.
-- The user explicitly chooses Local or My GPU; no silent upload of audio.
-- Show the destination and mode before upload.
+## Native recording and local inference
 
-## Failure behavior
+- Android records through `MediaRecorder` to app-private `.m4a` files.
+- Pause/resume/stop are available while the recording screen is active.
+- The existing native decoder converts audio to mono 16 kHz float PCM in bounded chunks.
+- The existing pinned whisper.cpp JNI runtime processes those chunks.
+- Local transcript and sync metadata are written to app-private storage before network sync. If the device is offline, the transcript remains available locally and sync can retry later.
+- The offline sync payload includes a stable `client_event_id`, device identifier, title, timestamps, transcript, language and local model identifier.
 
-- If the user selects Local, no network is required.
-- If the user selects My GPU and neither route is reachable, keep the audio on the phone and offer retry or local transcription.
-- If an upload is interrupted, preserve the source audio and allow retry.
-- If the GPU worker fails, preserve a clear failed job state and diagnostic ID; do not lose the original recording.
-- If the app closes, it can restore remote job status by job ID.
-- Never silently switch from Local to Remote or Remote to Local when that changes where audio is processed.
+## Shared GPU upload
 
-## Delivery plan
+- Audio is sent only after the user chooses Shared GPU and taps Upload and transcribe.
+- Android creates the job through the FastAPI upload endpoint and uses the short-lived signed URL returned by that endpoint.
+- The upload target is the same private `meeting-audio` bucket used by web.
+- The shared API verifies the object and enqueues the job.
+- Android polls the owner-scoped job endpoint and opens the shared meeting when complete.
+- Original audio remains on the phone unless separately removed by the user; cloud upload is an explicit copy.
 
-| Milestone | Scope | Exit criteria |
-|---|---|---|
-| M0.1 | Android file selection and playback | Existing CI green; reliable URI lifecycle |
-| M0.2 | Local Whisper runtime | Short multilingual test audio transcribes offline |
-| M0.3 | Local transcript UX | Progress, cancellation, history, TXT/SRT export |
-| M1.0 | Workstation API wrapper | Health, authenticated job creation, status, result |
-| M1.1 | LAN connectivity | Phone submits and retrieves a job over trusted LAN HTTPS |
-| M1.2 | Remote connectivity | Same workflow works over Tailscale away from LAN |
-| M1.3 | Resilience and hardening | Retry, cancellation, retention, security and long-file tests |
+## Security and privacy
 
-## Architectural guardrails
+- Supabase publishable key only in mobile code; user access token travels over HTTPS.
+- Database history reads use authenticated PostgREST requests protected by RLS.
+- FastAPI endpoints verify Supabase bearer tokens and enforce owner-scoped access.
+- Private audio upload uses a short-lived signed token; the bucket stays private.
+- Android never receives service-role keys, worker credentials, model-server credentials or LLM secrets.
+- Local transcription never sends raw audio to the backend.
 
-- Preserve the Python CLI and its existing modules as the reference implementation.
-- Keep the workstation service separate from Android and from the transcription engine.
-- Keep the API contract transport-independent so LAN and Tailscale use the same endpoints.
-- Keep local and remote execution behind one Android domain interface.
-- No paid cloud transcription API, mandatory subscription, or public internet exposure.
+## Build and verification
+
+The Android repo pins the native whisper.cpp runtime as a Git submodule. CI must clone submodules, install JDK 17, Android SDK 35, NDK 25.2.9519653 and CMake 3.22.1, then run:
+
+```bash
+gradle testDebugUnitTest
+gradle assembleDebug
+```
