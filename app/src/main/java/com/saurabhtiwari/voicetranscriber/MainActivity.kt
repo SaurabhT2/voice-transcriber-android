@@ -368,6 +368,7 @@ private fun MeetingWorkspaceScreen(
     var currentLocalRecord by remember { mutableStateOf<LocalMeetingRecord?>(null) }
     var meetingNotes by remember { mutableStateOf<JSONObject?>(null) }
     var notesBusy by remember { mutableStateOf(false) }
+    var meetingNotesStatus by remember { mutableStateOf("") }
     var errorMessage by remember { mutableStateOf("") }
 
     val audioPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -739,6 +740,7 @@ private fun MeetingWorkspaceScreen(
             currentLocalRecord = localStore.list(session.userId).firstOrNull { it.eventId == item.id }
             currentMeeting = null
             meetingNotes = null
+            meetingNotesStatus = ""
             tab = WorkspaceTab.HISTORY
             return
         }
@@ -749,6 +751,7 @@ private fun MeetingWorkspaceScreen(
                 currentMeeting = backend.getMeeting(session, meetingId)
                 currentLocalRecord = null
                 meetingNotes = null
+                meetingNotesStatus = ""
                 tab = WorkspaceTab.HISTORY
             } catch (error: Exception) {
                 errorMessage = error.message ?: "Unable to open this transcript."
@@ -765,13 +768,67 @@ private fun MeetingWorkspaceScreen(
         scope.launch {
             notesBusy = true
             errorMessage = ""
+            meetingNotesStatus = if (generate) "Queuing meeting notes on your PC…" else "Checking saved meeting notes…"
             try {
-                val response = if (generate) backend.generateMeetingNotes(session, meetingId)
-                    else backend.getMeetingNotes(session, meetingId)
-                meetingNotes = response.optJSONObject("notes")
-                    ?: throw IOException("No saved meeting notes were returned.")
+                var response = if (generate) {
+                    backend.generateMeetingNotes(
+                        session,
+                        meetingId,
+                        regenerate = meetingNotes != null
+                    )
+                } else {
+                    val latest = backend.getMeetingNotesStatus(session, meetingId)
+                    if (latest.optString("status") == "queued" || latest.optString("status") == "processing") {
+                        latest
+                    } else {
+                        backend.getMeetingNotes(session, meetingId)
+                    }
+                }
+
+                var notes = response.optJSONObject("notes")
+                if (notes != null) {
+                    meetingNotes = notes
+                    meetingNotesStatus = "Saved notes are available across Android and web."
+                } else {
+                    var jobId = response.optString("job_id").takeIf { it.isNotBlank() && it != "null" }
+                    var jobStatus = response.optString("status")
+                    if (jobStatus == "succeeded") {
+                        notes = backend.getMeetingNotes(session, meetingId).optJSONObject("notes")
+                    } else if (jobId == null) {
+                        throw IOException(
+                            if (jobStatus == "not_started") "No saved notes exist yet. Generate notes to start."
+                            else "The meeting-notes job was not returned by the server."
+                        )
+                    } else {
+                        meetingNotesStatus = if (jobStatus == "queued") {
+                            "Meeting notes are queued for your PC…"
+                        } else {
+                            "Your PC is generating meeting notes…"
+                        }
+                        for (attempt in 0 until 180) {
+                            delay(2500)
+                            response = backend.getMeetingNotesJob(session, meetingId, jobId)
+                            jobStatus = response.optString("status")
+                            when (jobStatus) {
+                                "succeeded" -> {
+                                    notes = backend.getMeetingNotes(session, meetingId).optJSONObject("notes")
+                                    break
+                                }
+                                "failed" -> throw IOException(
+                                    response.optString("error_code").ifBlank { "Meeting notes generation failed on the local PC." }
+                                )
+                                "queued" -> meetingNotesStatus = "Meeting notes are queued for your PC…"
+                                "processing" -> meetingNotesStatus = "Your PC is generating meeting notes…"
+                            }
+                        }
+                    }
+                    meetingNotes = notes ?: throw IOException("Meeting notes are still processing. Refresh this meeting to check again.")
+                    meetingNotesStatus = "Notes saved to your shared workspace. They are available on web as well."
+                }
             } catch (error: Exception) {
+                if (error is CancellationException) throw error
                 errorMessage = error.message ?: "Meeting notes could not be loaded."
+                meetingNotesStatus = ""
             } finally {
                 notesBusy = false
             }
@@ -912,6 +969,7 @@ private fun MeetingWorkspaceScreen(
                     currentLocalRecord = currentLocalRecord,
                     meetingNotes = meetingNotes,
                     notesBusy = notesBusy,
+                    notesStatus = meetingNotesStatus,
                     onLoadNotes = { runNotes(false) },
                     onGenerateNotes = { runNotes(true) }
                 )
@@ -1257,6 +1315,7 @@ private fun HistoryContent(
     currentLocalRecord: LocalMeetingRecord?,
     meetingNotes: JSONObject?,
     notesBusy: Boolean,
+    notesStatus: String,
     onLoadNotes: () -> Unit,
     onGenerateNotes: () -> Unit
 ) {
@@ -1343,8 +1402,12 @@ private fun HistoryContent(
                     }
                     Button(onClick = onGenerateNotes, enabled = !notesBusy, modifier = Modifier.weight(1f)) {
                         if (notesBusy) CircularProgressIndicator(Modifier.size(16.dp), color = Color.White, strokeWidth = 2.dp)
-                        else Text("Generate notes")
+                        else Text(if (meetingNotes != null) "Regenerate notes" else "Generate notes")
                     }
+                }
+                if (notesStatus.isNotBlank()) {
+                    Text(notesStatus, color = Muted, style = MaterialTheme.typography.bodySmall)
+                    if (notesBusy) LinearProgressIndicator(Modifier.fillMaxWidth(), color = Blue)
                 }
                 meetingNotes?.let { NotesContent(it) }
             }
