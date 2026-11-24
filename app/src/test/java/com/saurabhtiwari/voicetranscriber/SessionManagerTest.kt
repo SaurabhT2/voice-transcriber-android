@@ -128,6 +128,16 @@ class SessionManagerTest {
     }
 
     @Test
+    fun transientServerErrorDuringRestoreKeepsTheSavedSession() = runBlocking {
+        val store = FakeStore(session("old", 10))
+        val refresher = FakeRefresher { throw HttpException(503, "unavailable") }
+        val restored = manager(store, refresher).restore()
+        assertEquals("old", restored!!.accessToken)
+        assertEquals(0, store.cleared)
+        assertTrue(store.stored != null)
+    }
+
+    @Test
     fun restoreWithFreshTokenDoesNotRefresh() = runBlocking {
         val store = FakeStore(session("t", 3_600))
         val refresher = FakeRefresher { error("must not refresh") }
