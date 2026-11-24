@@ -67,19 +67,21 @@ The current web client reads the shared job and meeting lists from Supabase Data
 ## Authentication
 
 - Use the same Supabase project as the web app.
-- Magic-link sign-in uses the same email identity.
+- Magic-link sign-in uses the same email identity, with PKCE so an intercepted custom-scheme link cannot be redeemed by another app.
 - Android receives the verified session on `meetingworkspace://auth/callback`.
 - Add this URI to Supabase Authentication → URL Configuration → Additional Redirect URLs.
-- Access/refresh tokens are stored encrypted using Android Keystore.
+- Access/refresh tokens are stored encrypted using Android Keystore. `SessionManager` refreshes tokens before expiry, retries once after a 401, shares one refresh between concurrent calls, and only signs the user out when the auth server rejects the refresh token (never because the device is offline).
 - The Android client includes only the project URL and publishable key. Never include service-role keys or worker secrets.
 
 ## Native recording and local inference
 
 - Android records through `MediaRecorder` to app-private `.m4a` files.
-- Pause/resume/stop are available while the recording screen is active.
+- Recording is owned by `RecordingController` and driven by a foreground `RecordingService` (microphone type), so it keeps running when the screen locks, the app is backgrounded or the device rotates. Audio is captured at 16 kHz mono, the rate Whisper consumes.
+- Pause/resume/stop are available from the app and (stop) from the notification.
 - The existing native decoder converts audio to mono 16 kHz float PCM in bounded chunks.
 - The existing pinned whisper.cpp JNI runtime processes those chunks.
-- Local transcript and sync metadata are written to app-private storage before network sync. If the device is offline, the transcript remains available locally and sync can retry later.
+- Local transcript and sync metadata are written atomically to app-private storage before network sync. If the device is offline, the transcript remains available locally and `SyncWorker` (WorkManager, network-constrained, exponential backoff) retries later. `SyncCoordinator` serialises all sync callers.
+- On-device transcription runs in `LocalTranscriber`, an application-scoped component under a foreground service. The UI (`MeetingViewModel`) only observes it.
 - The offline sync payload includes a stable `client_event_id`, device identifier, title, timestamps, transcript, language and local model identifier.
 
 ## Shared GPU upload

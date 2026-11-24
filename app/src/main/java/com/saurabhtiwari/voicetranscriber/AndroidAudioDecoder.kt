@@ -11,22 +11,24 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import java.nio.ByteOrder
-import kotlin.math.floor
 
 /**
  * Decodes the first audio track using Android's platform codecs and emits
- * mono 16 kHz float PCM in bounded 30-second chunks.
+ * mono 16 kHz float PCM in chunks of at most 30 seconds. Chunk boundaries are placed in
+ * the quietest moment near the end of each window so words are not cut in half.
+ * [onChunk] receives the chunk and the offset of its first sample, in whole seconds.
  */
 object AndroidAudioDecoder {
-    private const val TARGET_SAMPLE_RATE = 16_000
+    private const val TARGET_SAMPLE_RATE = WHISPER_SAMPLE_RATE
     private const val CHUNK_SECONDS = 30
+    private const val MIN_TAIL_SAMPLES = TARGET_SAMPLE_RATE / 2
     private const val OUTPUT_TIMEOUT_US = 10_000L
 
     suspend fun decodeToChunks(
         context: Context,
         uri: Uri,
         onDuration: suspend (Long) -> Unit,
-        onChunk: suspend (samples: FloatArray, offsetSeconds: Long) -> Unit
+        onChunk: suspend (samples: FloatArray, startSeconds: Long) -> Unit
     ) = withContext(Dispatchers.IO) {
         val coroutine = currentCoroutineContext()
         val extractor = MediaExtractor()
@@ -63,8 +65,16 @@ object AndroidAudioDecoder {
             var channels = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
             var pcmEncoding = AudioFormat.ENCODING_PCM_16BIT
             var resampler = StreamingResampler(sourceRate)
-            val chunker = FloatChunker(TARGET_SAMPLE_RATE * CHUNK_SECONDS)
-            var lastProgressMs = 0L
+            val chunker = SilenceAwareChunker(maxSamples = TARGET_SAMPLE_RATE * CHUNK_SECONDS)
+            var emittedSamples = 0L
+
+            suspend fun emit(chunks: List<FloatArray>) {
+                for (chunk in chunks) {
+                    coroutine.ensureActive()
+                    onChunk(chunk, emittedSamples / TARGET_SAMPLE_RATE)
+                    emittedSamples += chunk.size
+                }
+            }
 
             while (!outputEnded) {
                 coroutine.ensureActive()
@@ -98,6 +108,7 @@ object AndroidAudioDecoder {
                         pcmEncoding = if (outputFormat.containsKey(MediaFormat.KEY_PCM_ENCODING)) {
                             outputFormat.getInteger(MediaFormat.KEY_PCM_ENCODING)
                         } else AudioFormat.ENCODING_PCM_16BIT
+                        emit(chunker.append(resampler.finish()))
                         resampler = StreamingResampler(sourceRate)
                     }
                     MediaCodec.INFO_TRY_AGAIN_LATER -> Unit
@@ -109,14 +120,7 @@ object AndroidAudioDecoder {
                             outputBuffer.position(info.offset)
                             outputBuffer.limit(info.offset + info.size)
                             val mono = pcmToMonoFloat(outputBuffer.slice().order(ByteOrder.LITTLE_ENDIAN), channels, pcmEncoding)
-                            val resampled = resampler.process(mono)
-                            val completedChunks = chunker.append(resampled)
-                            val progressMs = info.presentationTimeUs / 1_000L
-                            if (progressMs > lastProgressMs) lastProgressMs = progressMs
-                            for (chunk in completedChunks) {
-                                coroutine.ensureActive()
-                                onChunk(chunk, (progressMs / 1_000L).coerceAtLeast(0L))
-                            }
+                            emit(chunker.append(resampler.process(mono)))
                         }
                         if ((info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
                             outputEnded = true
@@ -126,9 +130,11 @@ object AndroidAudioDecoder {
                 }
             }
 
+            emit(chunker.append(resampler.finish()))
             chunker.finish()?.let { remaining ->
-                if (remaining.size >= TARGET_SAMPLE_RATE) {
-                    onChunk(remaining, (lastProgressMs / 1_000L).coerceAtLeast(0L))
+                if (remaining.size >= MIN_TAIL_SAMPLES) {
+                    coroutine.ensureActive()
+                    onChunk(remaining, emittedSamples / TARGET_SAMPLE_RATE)
                 }
             }
         } finally {
@@ -173,67 +179,5 @@ object AndroidAudioDecoder {
             result[frame] = (sum / channels).coerceIn(-1f, 1f)
         }
         return result
-    }
-
-    private class StreamingResampler(private val inputRate: Int) {
-        private val step = inputRate.toDouble() / TARGET_SAMPLE_RATE
-        private var totalInputSamples = 0L
-        private var nextOutputPosition = 0.0
-        private var previousSample: Float? = null
-
-        fun process(input: FloatArray): FloatArray {
-            if (input.isEmpty()) return FloatArray(0)
-            if (inputRate == TARGET_SAMPLE_RATE) {
-                totalInputSamples += input.size
-                previousSample = input.last()
-                return input
-            }
-            val previous = previousSample
-            val combined = FloatArray(input.size + if (previous == null) 0 else 1)
-            var offset = 0
-            if (previous != null) {
-                combined[0] = previous
-                offset = 1
-            }
-            input.copyInto(combined, offset)
-            val baseIndex = totalInputSamples - if (previous == null) 0 else 1
-            val output = ArrayList<Float>()
-            while (true) {
-                val localPosition = nextOutputPosition - baseIndex
-                val left = floor(localPosition).toInt()
-                if (left < 0 || left + 1 >= combined.size) break
-                val fraction = (localPosition - left).toFloat()
-                output += combined[left] + (combined[left + 1] - combined[left]) * fraction
-                nextOutputPosition += step
-            }
-            totalInputSamples += input.size
-            previousSample = input.last()
-            return output.toFloatArray()
-        }
-    }
-
-    private class FloatChunker(private val chunkSize: Int) {
-        private var buffer = FloatArray(chunkSize)
-        private var size = 0
-
-        fun append(samples: FloatArray): List<FloatArray> {
-            val chunks = ArrayList<FloatArray>()
-            var sourceOffset = 0
-            while (sourceOffset < samples.size) {
-                val count = minOf(chunkSize - size, samples.size - sourceOffset)
-                samples.copyInto(buffer, size, sourceOffset, sourceOffset + count)
-                size += count
-                sourceOffset += count
-                if (size == chunkSize) {
-                    chunks += buffer
-                    buffer = FloatArray(chunkSize)
-                    size = 0
-                }
-            }
-            return chunks
-        }
-
-        fun finish(): FloatArray? =
-            if (size == 0) null else buffer.copyOf(size)
     }
 }

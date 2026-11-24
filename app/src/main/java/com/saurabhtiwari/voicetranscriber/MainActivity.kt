@@ -1,16 +1,16 @@
 package com.saurabhtiwari.voicetranscriber
 
 import android.Manifest
-import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
-import android.media.MediaRecorder
-import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.viewModels
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -26,11 +27,15 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.AccessTime
 import androidx.compose.material.icons.filled.AudioFile
 import androidx.compose.material.icons.filled.AutoAwesome
@@ -41,7 +46,6 @@ import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.LibraryMusic
 import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
@@ -70,16 +74,11 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberUpdatedState
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -90,22 +89,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
-import com.whispercpp.whisper.WhisperContext
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import org.json.JSONArray
-import org.json.JSONObject
-import java.io.File
-import java.io.IOException
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
 import java.time.Instant
 import java.util.Locale
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import org.json.JSONObject
 
 private val Canvas = Color(0xFFF7F9FC)
 private val Ink = Color(0xFF18212F)
@@ -136,101 +126,46 @@ private val WorkspaceColors = lightColorScheme(
 )
 
 class MainActivity : ComponentActivity() {
-    private lateinit var backend: WorkspaceBackend
-    private val activityScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-    private var sessionState by mutableStateOf<UserSession?>(null)
-    private var restoringSession by mutableStateOf(true)
-    private var authBusy by mutableStateOf(false)
-    private var authMessage by mutableStateOf("")
-    private var authError by mutableStateOf("")
+    private val auth: AuthViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        backend = WorkspaceBackend(this)
         setContent {
             WorkspaceTheme {
+                val signedIn = auth.session
                 when {
-                    restoringSession -> LoadingScreen("Opening your workspace…")
-                    sessionState == null -> SignInScreen(
-                        busy = authBusy,
-                        message = authMessage,
-                        error = authError,
-                        onSendLink = ::sendMagicLink
+                    auth.restoring -> LoadingScreen("Opening your workspace…")
+                    signedIn == null -> SignInScreen(
+                        busy = auth.busy,
+                        message = auth.message,
+                        error = auth.error,
+                        onSendLink = auth::sendMagicLink
                     )
                     else -> MeetingWorkspaceScreen(
-                        session = sessionState!!,
-                        backend = backend,
-                        onSignOut = ::signOut
+                        session = signedIn,
+                        onSignOut = auth::signOut,
+                        onSessionExpired = auth::onSessionExpired
                     )
                 }
             }
         }
-
-        val callback = intent?.data
-        if (callback?.scheme == "meetingworkspace") {
-            completeSignIn(callback)
-        } else {
-            activityScope.launch {
-                sessionState = withContext(Dispatchers.IO) { backend.restoreSession() }
-                restoringSession = false
-            }
-        }
+        // Only a fresh launch may consume a sign-in link. A recreated activity still carries the
+        // original intent and must not replay a one-time code.
+        val handled = savedInstanceState == null && handleAuthLink(intent)
+        if (!handled) auth.restore()
     }
 
-    override fun onNewIntent(intent: android.content.Intent) {
+    override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        setIntent(intent)
-        val callback = intent.data
-        if (callback?.scheme == "meetingworkspace") completeSignIn(callback)
+        handleAuthLink(intent)
     }
 
-    private fun sendMagicLink(email: String) {
-        activityScope.launch {
-            authBusy = true
-            authError = ""
-            authMessage = ""
-            try {
-                backend.sendMagicLink(email)
-                authMessage = "A secure sign-in link has been sent. Open it on this device to continue."
-            } catch (error: Exception) {
-                authError = error.message ?: "Unable to send the sign-in link."
-            } finally {
-                authBusy = false
-            }
-        }
-    }
-
-    private fun completeSignIn(callback: Uri) {
-        restoringSession = true
-        authError = ""
-        activityScope.launch {
-            try {
-                sessionState = backend.completeMagicLink(callback)
-                authMessage = ""
-            } catch (error: Exception) {
-                sessionState = null
-                authError = error.message ?: "The sign-in link could not be verified."
-            } finally {
-                restoringSession = false
-            }
-        }
-    }
-
-    private fun signOut() {
-        activityScope.launch {
-            try {
-                backend.signOut(sessionState)
-            } finally {
-                sessionState = null
-                authMessage = ""
-                authError = ""
-            }
-        }
-    }
-
-    override fun onDestroy() {
-        activityScope.cancel()
-        super.onDestroy()
+    private fun handleAuthLink(source: Intent?): Boolean {
+        val link = source?.data ?: return false
+        if (link.scheme != "meetingworkspace" || link.host != "auth") return false
+        setIntent(Intent(source).setData(null)) // consume so it can never be replayed
+        auth.completeSignIn(link)
+        return true
     }
 }
 
@@ -308,536 +243,84 @@ private fun SignInScreen(
     }
 }
 
-private enum class WorkspaceTab { OVERVIEW, TRANSCRIBE, HISTORY }
-private enum class TranscriptionMode { LOCAL, SHARED_GPU }
-private enum class HistoryFilter { ALL, PROCESSING, COMPLETED, ATTENTION }
-
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun MeetingWorkspaceScreen(
     session: UserSession,
-    backend: WorkspaceBackend,
-    onSignOut: () -> Unit
+    onSignOut: () -> Unit,
+    onSessionExpired: () -> Unit
 ) {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    val localStore = remember(context) { LocalMeetingStore(context) }
-    val recorder = remember(context) { MeetingAudioRecorder(context) }
-    val modelFile = remember(context) { WhisperModelManager.modelFile(context) }
+    val vm: MeetingViewModel = viewModel(key = session.userId, factory = MeetingViewModel.factory(session.userId))
+    val recording by RecordingController.state.collectAsStateWithLifecycle()
+    val model by vm.modelState.collectAsStateWithLifecycle()
+    val transcription by vm.transcriptionState.collectAsStateWithLifecycle()
 
-    var tab by remember { mutableStateOf(WorkspaceTab.OVERVIEW) }
-    var history by remember { mutableStateOf(emptyList<RecordingItem>()) }
-    var historyLoading by remember { mutableStateOf(false) }
-    var historyError by remember { mutableStateOf("") }
-    var historyFilter by remember { mutableStateOf(HistoryFilter.ALL) }
-
-    var selectedUri by remember { mutableStateOf<Uri?>(null) }
-    var selectedFile by remember { mutableStateOf<File?>(null) }
-    var selectedName by remember { mutableStateOf("") }
-    var selectedContentType by remember { mutableStateOf("audio/mp4") }
-    var selectedStartedAt by remember { mutableStateOf(Instant.now().toString()) }
-
-    var isRecording by remember { mutableStateOf(false) }
-    var isPaused by remember { mutableStateOf(false) }
-    var elapsedRecordingMs by remember { mutableLongStateOf(0L) }
-    var recordingFile by remember { mutableStateOf<File?>(null) }
-    var recordingError by remember { mutableStateOf("") }
-
-    var selectedMode by remember { mutableStateOf(TranscriptionMode.LOCAL) }
-    var language by remember { mutableStateOf("auto") }
-    var languageExpanded by remember { mutableStateOf(false) }
-
-    var whisperContext by remember { mutableStateOf<WhisperContext?>(null) }
-    var modelLoading by remember { mutableStateOf(false) }
-    var modelProgress by remember { mutableFloatStateOf(0f) }
-    var modelStatus by remember {
-        mutableStateOf(if (modelFile.exists()) "Offline model downloaded. Load it when you are ready."
-            else "Download a compact multilingual model for private on-device transcription.")
+    LaunchedEffect(session.userId) { vm.onScreenEntered() }
+    LaunchedEffect(vm.requiresSignIn) {
+        if (vm.requiresSignIn) {
+            vm.acknowledgeSignInRequired()
+            onSessionExpired()
+        }
     }
 
-    var localTranscribing by remember { mutableStateOf(false) }
-    var localTranscript by remember { mutableStateOf("") }
-    var transcriptionStatus by remember { mutableStateOf("Select a recording and choose where to transcribe it.") }
-    var transcriptionProgress by remember { mutableFloatStateOf(0f) }
-    var transcriptionJob by remember { mutableStateOf<Job?>(null) }
+    // The recording clock is derived from a monotonic timestamp, so it is correct after the
+    // screen was away or recreated; this state only drives redraws.
+    var nowMs by remember { mutableLongStateOf(SystemClock.elapsedRealtime()) }
+    LaunchedEffect(recording.active, recording.paused) {
+        while (recording.active && !recording.paused) {
+            nowMs = SystemClock.elapsedRealtime()
+            delay(500)
+        }
+    }
+    val elapsedRecordingMs = recording.elapsedAt(nowMs)
 
-    var cloudBusy by remember { mutableStateOf(false) }
-    var cloudStatus by remember { mutableStateOf("") }
-    var cloudJob by remember { mutableStateOf<CloudJob?>(null) }
-    var currentMeeting by remember { mutableStateOf<MeetingDetail?>(null) }
-    var currentLocalRecord by remember { mutableStateOf<LocalMeetingRecord?>(null) }
-    var meetingNotes by remember { mutableStateOf<JSONObject?>(null) }
-    var notesBusy by remember { mutableStateOf(false) }
-    var meetingNotesStatus by remember { mutableStateOf("") }
-    var errorMessage by remember { mutableStateOf("") }
+    val completedCount = remember(vm.history) { vm.history.count { it.status == "succeeded" } }
+    val processingCount = remember(vm.history) { vm.history.count { it.status == "queued" || it.status == "processing" } }
+    val attentionCount = remember(vm.history) {
+        vm.history.count { it.status == "failed" || it.status == "upload_pending" || it.isLocalOnly }
+    }
+
+    // Jobs keep running on the server; follow them while the history is on screen.
+    val hasProcessing = processingCount > 0
+    LaunchedEffect(vm.tab, hasProcessing) {
+        while (vm.tab == WorkspaceTab.HISTORY && hasProcessing) {
+            delay(8_000)
+            vm.refreshHistory()
+        }
+    }
 
     val audioPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) {
-            try {
-                context.contentResolver.takePersistableUriPermission(
-                    uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
-                )
-            } catch (_: SecurityException) { }
-            selectedUri = uri
-            selectedFile = null
-            selectedName = queryDisplayName(context, uri) ?: uri.lastPathSegment ?: "Selected recording"
-            selectedContentType = resolveContentType(context, uri, selectedName)
-            selectedStartedAt = Instant.now().toString()
-            localTranscript = ""
-            transcriptionStatus = "Recording selected. Choose Local or Shared GPU."
-            currentMeeting = null
-            currentLocalRecord = null
-            cloudJob = null
-            cloudStatus = ""
-        }
+        if (uri != null) vm.onAudioPicked(uri)
     }
-
-    suspend fun refreshHistory() {
-        historyLoading = true
-        historyError = ""
-        try {
-            // Retry locally completed transcripts whenever history is refreshed.
-            localStore.pendingSync(session.userId).forEach { record ->
-                try {
-                    val meetingId = backend.syncOfflineTranscript(
-                        session = session,
-                        eventId = record.eventId,
-                        title = record.title,
-                        startedAt = record.startedAt,
-                        endedAt = record.endedAt,
-                        transcript = record.transcript,
-                        language = record.language
-                    )
-                    localStore.markSynced(session.userId, record.eventId, meetingId)
-                } catch (_: Exception) {
-                    // Preserve the local transcript and try again on the next refresh.
-                }
-            }
-            val remote = backend.loadRecordings(session)
-            val localOnly = localStore.pendingSync(session.userId).map { record ->
-                RecordingItem(
-                    id = record.eventId,
-                    title = record.title,
-                    status = "local_saved",
-                    source = "android_offline",
-                    createdAt = record.createdAt,
-                    meetingId = null,
-                    transcriptId = null,
-                    isLocalOnly = true
-                )
-            }
-            history = (remote + localOnly).sortedByDescending { it.createdAt }
-        } catch (error: Exception) {
-            historyError = error.message ?: "Unable to refresh recordings."
-            val localOnly = localStore.list(session.userId).mapNotNull { record ->
-                if (record.meetingId != null) null
-                else RecordingItem(
-                    id = record.eventId,
-                    title = record.title,
-                    status = "local_saved",
-                    source = "android_offline",
-                    createdAt = record.createdAt,
-                    meetingId = null,
-                    transcriptId = null,
-                    isLocalOnly = true
-                )
-            }
-            history = localOnly
-        } finally {
-            historyLoading = false
-        }
-    }
-
-    LaunchedEffect(session.userId) {
-        localStore.pendingSync(session.userId).forEach { record ->
-            try {
-                val meetingId = backend.syncOfflineTranscript(
-                    session = session,
-                    eventId = record.eventId,
-                    title = record.title,
-                    startedAt = record.startedAt,
-                    endedAt = record.endedAt,
-                    transcript = record.transcript,
-                    language = record.language
-                )
-                localStore.markSynced(session.userId, record.eventId, meetingId)
-            } catch (_: Exception) {
-                // Keep the device copy and retry on a later app launch or explicit refresh.
-            }
-        }
-        refreshHistory()
-    }
-
-    LaunchedEffect(isRecording, isPaused) {
-        while (isRecording) {
-            delay(1_000)
-            if (!isPaused) elapsedRecordingMs += 1_000L
-        }
-    }
-
-    val latestIsRecording by rememberUpdatedState(isRecording)
-    val latestWhisperContext by rememberUpdatedState(whisperContext)
-
-    DisposableEffect(recorder) {
-        onDispose {
-            if (latestIsRecording) recorder.release()
-            latestWhisperContext?.let { loaded ->
-                CoroutineScope(SupervisorJob() + Dispatchers.IO).launch { loaded.release() }
-            }
-        }
-    }
-
-    fun clearSelectedRecording() {
-        selectedUri = null
-        selectedFile = null
-        selectedName = ""
-        localTranscript = ""
-        transcriptionStatus = "Select a recording to begin."
-        currentMeeting = null
-        currentLocalRecord = null
-        cloudJob = null
-        cloudStatus = ""
-    }
-
-    fun startRecordingNow() {
-        try {
-            val file = recorder.start()
-            recordingFile = file
-            selectedFile = file
-            selectedUri = Uri.fromFile(file)
-            selectedName = file.name
-            selectedContentType = "audio/mp4"
-            selectedStartedAt = Instant.now().toString()
-            elapsedRecordingMs = 0L
-            isRecording = true
-            isPaused = false
-            recordingError = ""
-            localTranscript = ""
-            transcriptionStatus = "Recording in progress."
-            tab = WorkspaceTab.TRANSCRIBE
-        } catch (error: Exception) {
-            recordingError = error.message ?: "Unable to start recording. Check microphone access."
-        }
-    }
-
-    fun stopRecordingNow() {
-        val file = recorder.stop()
-        isRecording = false
-        isPaused = false
-        if (file == null) {
-            recordingError = "The recording was too short or could not be finalized. Please record again."
-            recordingFile = null
-            return
-        }
-        recordingFile = file
-        selectedFile = file
-        selectedUri = Uri.fromFile(file)
-        selectedName = file.name
-        selectedContentType = "audio/mp4"
-        transcriptionStatus = "Recording saved on this device. Choose Local or Shared GPU."
-    }
-
-    val microphonePermission = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        if (granted) startRecordingNow()
-        else recordingError = "Microphone access is required to record a meeting."
+    val recordingPermissions = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) {
+        // Notifications are optional (the foreground service runs without them); the microphone is not.
+        val micGranted = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+        if (micGranted) vm.startRecording()
+        else vm.reportRecordingError("Microphone access is required to record a meeting.")
     }
 
     fun requestRecording() {
-        val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+        val micGranted = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
             PackageManager.PERMISSION_GRANTED
-        if (granted) startRecordingNow()
-        else microphonePermission.launch(Manifest.permission.RECORD_AUDIO)
-    }
-
-    fun loadLocalModel() {
-        if (modelLoading || whisperContext != null) return
-        scope.launch {
-            modelLoading = true
-            modelProgress = 0f
-            errorMessage = ""
-            try {
-                val file = WhisperModelManager.download(context) { downloaded, total ->
-                    withContext(Dispatchers.Main) {
-                        modelProgress = if (total > 0) (downloaded.toFloat() / total).coerceIn(0f, 1f) else 0f
-                        modelStatus = if (total > 0) {
-                            "Downloading offline model: " + (modelProgress * 100).toInt() + "%"
-                        } else {
-                            "Downloading offline model: " + (downloaded / (1024L * 1024L)) + " MB"
-                        }
-                    }
-                }
-                modelStatus = "Loading local language model…"
-                val loaded = withContext(Dispatchers.IO) {
-                    WhisperContext.createContextFromFile(file.absolutePath)
-                }
-                whisperContext = loaded
-                modelStatus = "Local model is ready. Transcription stays on this phone."
-            } catch (error: Exception) {
-                modelStatus = error.message ?: "Unable to prepare the local model."
-            } catch (error: LinkageError) {
-                modelStatus = error.message ?: "Native model runtime is unavailable on this device."
-            } finally {
-                modelLoading = false
+        val needsNotifications = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        if (micGranted && !needsNotifications) {
+            vm.startRecording()
+        } else {
+            val missing = buildList {
+                if (!micGranted) add(Manifest.permission.RECORD_AUDIO)
+                if (needsNotifications) add(Manifest.permission.POST_NOTIFICATIONS)
             }
+            recordingPermissions.launch(missing.toTypedArray())
         }
     }
 
-    fun startLocalTranscription() {
-        val uri = selectedUri ?: return
-        val engine = whisperContext ?: return
-        if (localTranscribing) {
-            transcriptionJob?.cancel()
-            return
-        }
-        localTranscript = ""
-        transcriptionStatus = "Preparing audio…"
-        transcriptionProgress = 0f
-        localTranscribing = true
-        currentMeeting = null
-        currentLocalRecord = null
-        transcriptionJob = scope.launch {
-            val output = StringBuilder()
-            var chunksProcessed = 0
-            var totalDurationMs = 0L
-            try {
-                AndroidAudioDecoder.decodeToChunks(
-                    context = context,
-                    uri = uri,
-                    onDuration = { duration ->
-                        totalDurationMs = duration
-                        withContext(Dispatchers.Main) {
-                            transcriptionStatus = "Preparing " + formatDuration(duration.toInt()) + " of audio…"
-                        }
-                    },
-                    onChunk = { samples, offsetSeconds ->
-                        chunksProcessed += 1
-                        withContext(Dispatchers.Main) {
-                            transcriptionStatus = "Transcribing audio section " + chunksProcessed + "…"
-                            if (totalDurationMs > 0L) {
-                                transcriptionProgress = (offsetSeconds.toFloat() / (totalDurationMs / 1000f)).coerceIn(0f, 0.98f)
-                            }
-                        }
-                        val recognized = withContext(Dispatchers.Default) {
-                            engine.transcribeData(samples, printTimestamp = false).trim()
-                        }
-                        if (recognized.isNotBlank()) {
-                            if (output.isNotEmpty()) output.append("\n\n")
-                            output.append(recognized)
-                            withContext(Dispatchers.Main) { localTranscript = output.toString() }
-                        }
-                    }
-                )
-                val transcriptText = output.toString().trim()
-                if (transcriptText.isBlank()) {
-                    transcriptionStatus = "Processing complete. No speech was detected."
-                } else {
-                    val endedAt = Instant.now().toString()
-                    val saved = localStore.save(
-                        ownerId = session.userId,
-                        title = selectedName.ifBlank { "Local recording" },
-                        transcript = transcriptText,
-                        startedAt = selectedStartedAt,
-                        endedAt = endedAt,
-                        language = if (language == "auto") null else language
-                    )
-                    currentLocalRecord = saved
-                    transcriptionProgress = 1f
-                    transcriptionStatus = "Saved on this device. Syncing transcript to your workspace…"
-                    try {
-                        val meetingId = backend.syncOfflineTranscript(
-                            session = session,
-                            eventId = saved.eventId,
-                            title = saved.title,
-                            startedAt = saved.startedAt,
-                            endedAt = saved.endedAt,
-                            transcript = saved.transcript,
-                            language = saved.language
-                        )
-                        localStore.markSynced(session.userId, saved.eventId, meetingId)
-                        currentMeeting = backend.getMeeting(session, meetingId)
-                        currentLocalRecord = null
-                        transcriptionStatus = "Transcription complete. Transcript synced to your workspace."
-                        tab = WorkspaceTab.HISTORY
-                    } catch (syncError: Exception) {
-                        transcriptionStatus = "Transcript saved locally. Sync will retry when you are online."
-                        errorMessage = syncError.message ?: ""
-                    }
-                    refreshHistory()
-                }
-            } catch (cancelled: CancellationException) {
-                transcriptionStatus = "Transcription cancelled."
-                throw cancelled
-            } catch (error: Exception) {
-                transcriptionStatus = error.message ?: "Unable to transcribe this recording locally."
-            } finally {
-                localTranscribing = false
-                transcriptionJob = null
-            }
-        }
-    }
-
-    fun startSharedGpuTranscription() {
-        val uri = selectedUri ?: return
-        if (cloudBusy) return
-        scope.launch {
-            cloudBusy = true
-            cloudStatus = "Preparing secure upload…"
-            cloudJob = null
-            errorMessage = ""
-            var stagedFile: File? = null
-            try {
-                val file = selectedFile ?: copyRecordingToCache(context, uri, selectedName)
-                    .also { stagedFile = it }
-                val contentType = resolveContentType(context, uri, selectedName)
-                var job = backend.createCloudUpload(
-                    session = session,
-                    file = file,
-                    fileName = selectedName.ifBlank { file.name },
-                    contentType = contentType,
-                    language = if (language == "auto") null else language
-                )
-                cloudJob = job
-                cloudStatus = "Upload complete. Waiting for the shared GPU worker…"
-                refreshHistory()
-
-                while (job.status == "queued" || job.status == "processing" || job.status == "upload_pending") {
-                    delay(4_000)
-                    job = backend.getCloudJob(session, job.jobId)
-                    cloudJob = job
-                    cloudStatus = when (job.status) {
-                        "queued" -> "Queued for transcription…"
-                        "processing" -> "Transcribing on the shared GPU worker…"
-                        "succeeded" -> "Transcription complete."
-                        else -> job.status.replace('_', ' ')
-                    }
-                }
-                if (job.status == "succeeded" && !job.meetingId.isNullOrBlank()) {
-                    currentMeeting = backend.getMeeting(session, job.meetingId)
-                    currentLocalRecord = null
-                    meetingNotes = null
-                    tab = WorkspaceTab.HISTORY
-                    refreshHistory()
-                } else if (job.status == "failed") {
-                    errorMessage = job.errorCode ?: "Transcription failed. Your original audio remains on this device."
-                } else {
-                    errorMessage = "Transcription ended with status: " + job.status
-                }
-            } catch (error: Exception) {
-                cloudStatus = "Upload or transcription could not be completed."
-                errorMessage = error.message ?: "Unable to send this recording to the shared GPU worker."
-                refreshHistory()
-            } finally {
-                stagedFile?.delete()
-                cloudBusy = false
-            }
-        }
-    }
-
-    fun openRecording(item: RecordingItem) {
-        if (item.isLocalOnly) {
-            currentLocalRecord = localStore.list(session.userId).firstOrNull { it.eventId == item.id }
-            currentMeeting = null
-            meetingNotes = null
-            meetingNotesStatus = ""
-            tab = WorkspaceTab.HISTORY
-            return
-        }
-        val meetingId = item.meetingId ?: return
-        scope.launch {
-            errorMessage = ""
-            try {
-                currentMeeting = backend.getMeeting(session, meetingId)
-                currentLocalRecord = null
-                meetingNotes = null
-                meetingNotesStatus = ""
-                tab = WorkspaceTab.HISTORY
-            } catch (error: Exception) {
-                errorMessage = error.message ?: "Unable to open this transcript."
-            }
-        }
-    }
-
-    fun refreshNow() {
-        scope.launch { refreshHistory() }
-    }
-
-    fun runNotes(generate: Boolean) {
-        val meetingId = currentMeeting?.meetingId ?: return
-        scope.launch {
-            notesBusy = true
-            errorMessage = ""
-            meetingNotesStatus = if (generate) "Queuing meeting notes on your PC…" else "Checking saved meeting notes…"
-            try {
-                var response = if (generate) {
-                    backend.generateMeetingNotes(
-                        session,
-                        meetingId,
-                        regenerate = meetingNotes != null
-                    )
-                } else {
-                    val latest = backend.getMeetingNotesStatus(session, meetingId)
-                    if (latest.optString("status") == "queued" || latest.optString("status") == "processing") {
-                        latest
-                    } else {
-                        backend.getMeetingNotes(session, meetingId)
-                    }
-                }
-
-                var notes = response.optJSONObject("notes")
-                if (notes != null) {
-                    meetingNotes = notes
-                    meetingNotesStatus = "Saved notes are available across Android and web."
-                } else {
-                    var jobId = response.optString("job_id").takeIf { it.isNotBlank() && it != "null" }
-                    var jobStatus = response.optString("status")
-                    if (jobStatus == "succeeded") {
-                        notes = backend.getMeetingNotes(session, meetingId).optJSONObject("notes")
-                    } else if (jobId == null) {
-                        throw IOException(
-                            if (jobStatus == "not_started") "No saved notes exist yet. Generate notes to start."
-                            else "The meeting-notes job was not returned by the server."
-                        )
-                    } else {
-                        meetingNotesStatus = if (jobStatus == "queued") {
-                            "Meeting notes are queued for your PC…"
-                        } else {
-                            "Your PC is generating meeting notes…"
-                        }
-                        for (attempt in 0 until 180) {
-                            delay(2500)
-                            response = backend.getMeetingNotesJob(session, meetingId, jobId)
-                            jobStatus = response.optString("status")
-                            when (jobStatus) {
-                                "succeeded" -> {
-                                    notes = backend.getMeetingNotes(session, meetingId).optJSONObject("notes")
-                                    break
-                                }
-                                "failed" -> throw IOException(
-                                    response.optString("error_code").ifBlank { "Meeting notes generation failed on the local PC." }
-                                )
-                                "queued" -> meetingNotesStatus = "Meeting notes are queued for your PC…"
-                                "processing" -> meetingNotesStatus = "Your PC is generating meeting notes…"
-                            }
-                        }
-                    }
-                    meetingNotes = notes ?: throw IOException("Meeting notes are still processing. Refresh this meeting to check again.")
-                    meetingNotesStatus = "Notes saved to your shared workspace. They are available on web as well."
-                }
-            } catch (error: Exception) {
-                if (error is CancellationException) throw error
-                errorMessage = error.message ?: "Meeting notes could not be loaded."
-                meetingNotesStatus = ""
-            } finally {
-                notesBusy = false
-            }
-        }
-    }
-
-    val completedCount = history.count { it.status == "succeeded" }
-    val processingCount = history.count { it.status == "queued" || it.status == "processing" }
-    val attentionCount = history.count { it.status == "failed" || it.status == "upload_pending" || it.isLocalOnly }
+    val transcriptionStatus = transcription.status.ifBlank { vm.hint }
 
     Scaffold(
         containerColor = Canvas,
@@ -875,108 +358,117 @@ private fun MeetingWorkspaceScreen(
         bottomBar = {
             NavigationBar(containerColor = Color.White) {
                 NavigationBarItem(
-                    selected = tab == WorkspaceTab.OVERVIEW,
-                    onClick = { tab = WorkspaceTab.OVERVIEW },
+                    selected = vm.tab == WorkspaceTab.OVERVIEW,
+                    onClick = { vm.tab = WorkspaceTab.OVERVIEW },
                     icon = { androidx.compose.material3.Icon(Icons.Default.GraphicEq, null) },
                     label = { Text("Overview") }
                 )
                 NavigationBarItem(
-                    selected = tab == WorkspaceTab.TRANSCRIBE,
-                    onClick = { tab = WorkspaceTab.TRANSCRIBE },
+                    selected = vm.tab == WorkspaceTab.TRANSCRIBE,
+                    onClick = { vm.tab = WorkspaceTab.TRANSCRIBE },
                     icon = { androidx.compose.material3.Icon(Icons.Default.UploadFile, null) },
                     label = { Text("Transcribe") }
                 )
                 NavigationBarItem(
-                    selected = tab == WorkspaceTab.HISTORY,
-                    onClick = { tab = WorkspaceTab.HISTORY; refreshNow() },
+                    selected = vm.tab == WorkspaceTab.HISTORY,
+                    onClick = { vm.tab = WorkspaceTab.HISTORY; vm.refreshHistory() },
                     icon = { androidx.compose.material3.Icon(Icons.Default.LibraryMusic, null) },
                     label = { Text("My recordings") }
                 )
             }
         }
     ) { padding ->
-        Column(
-            modifier = Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
-        ) {
-            if (errorMessage.isNotBlank()) {
-                InfoMessage(errorMessage, Color(0xFFFFEEEE), Color(0xFFB33C46), onDismiss = { errorMessage = "" })
+        Column(modifier = Modifier.fillMaxSize().padding(padding).padding(horizontal = 16.dp)) {
+            if (vm.errorMessage.isNotBlank()) {
+                Spacer(Modifier.height(12.dp))
+                InfoMessage(vm.errorMessage, Color(0xFFFFEEEE), Color(0xFFB33C46), onDismiss = { vm.dismissError() })
             }
-            when (tab) {
-                WorkspaceTab.OVERVIEW -> OverviewContent(
-                    email = session.email,
-                    recordingCount = history.size,
-                    completedCount = completedCount,
-                    processingCount = processingCount,
-                    attentionCount = attentionCount,
-                    onRecord = { requestRecording() },
-                    onUpload = { tab = WorkspaceTab.TRANSCRIBE; audioPicker.launch(arrayOf("audio/*", "video/mp4")) },
-                    onTranscribe = { tab = WorkspaceTab.TRANSCRIBE },
-                    onHistory = { tab = WorkspaceTab.HISTORY; refreshNow() }
-                )
-                WorkspaceTab.TRANSCRIBE -> TranscribeContent(
-                    selectedName = selectedName,
-                    selectedContentType = selectedContentType,
-                    selectedMode = selectedMode,
-                    onModeChange = { selectedMode = it },
-                    isRecording = isRecording,
-                    isPaused = isPaused,
-                    elapsedRecordingMs = elapsedRecordingMs,
-                    recordingError = recordingError,
-                    onRecord = { requestRecording() },
-                    onPauseResume = {
-                        try {
-                            if (isPaused) recorder.resume() else recorder.pause()
-                            isPaused = !isPaused
-                        } catch (error: Exception) {
-                            recordingError = error.message ?: "Unable to update the recording."
-                        }
-                    },
-                    onStopRecording = { stopRecordingNow() },
-                    onChooseFile = { audioPicker.launch(arrayOf("audio/*", "video/mp4")) },
-                    onClearFile = { clearSelectedRecording() },
-                    language = language,
-                    languageExpanded = languageExpanded,
-                    onLanguageExpanded = { languageExpanded = it },
-                    onLanguageChange = { language = it },
-                    modelStatus = modelStatus,
-                    modelLoading = modelLoading,
-                    modelProgress = modelProgress,
-                    modelReady = whisperContext != null,
-                    onPrepareModel = { loadLocalModel() },
-                    localTranscribing = localTranscribing,
-                    transcriptionStatus = transcriptionStatus,
-                    transcriptionProgress = transcriptionProgress,
-                    localTranscript = localTranscript,
-                    cloudBusy = cloudBusy,
-                    cloudStatus = cloudStatus,
-                    cloudJob = cloudJob,
-                    onLocalTranscribe = { startLocalTranscription() },
-                    onCloudTranscribe = { startSharedGpuTranscription() },
-                    onCancelLocal = { transcriptionJob?.cancel() },
-                    canTranscribe = selectedUri != null
-                )
+            when (vm.tab) {
+                WorkspaceTab.OVERVIEW -> ScrollingTab {
+                    OverviewContent(
+                        email = session.email,
+                        recordingCount = vm.history.size,
+                        completedCount = completedCount,
+                        processingCount = processingCount,
+                        attentionCount = attentionCount,
+                        onRecord = { requestRecording() },
+                        onUpload = {
+                            vm.tab = WorkspaceTab.TRANSCRIBE
+                            audioPicker.launch(arrayOf("audio/*", "video/mp4"))
+                        },
+                        onTranscribe = { vm.tab = WorkspaceTab.TRANSCRIBE },
+                        onHistory = { vm.tab = WorkspaceTab.HISTORY; vm.refreshHistory() }
+                    )
+                }
+                WorkspaceTab.TRANSCRIBE -> ScrollingTab {
+                    TranscribeContent(
+                        selectedName = vm.selectedName,
+                        selectedContentType = vm.selectedContentType,
+                        selectedMode = vm.selectedMode,
+                        onModeChange = { vm.selectedMode = it },
+                        isRecording = recording.active,
+                        isPaused = recording.paused,
+                        elapsedRecordingMs = elapsedRecordingMs,
+                        recordingError = vm.recordingError,
+                        onRecord = { requestRecording() },
+                        onPauseResume = { vm.pauseOrResumeRecording() },
+                        onStopRecording = { vm.stopRecording() },
+                        onChooseFile = { audioPicker.launch(arrayOf("audio/*", "video/mp4")) },
+                        onClearFile = { vm.clearSelectedRecording() },
+                        language = vm.language,
+                        languageExpanded = vm.languageExpanded,
+                        onLanguageExpanded = { vm.languageExpanded = it },
+                        onLanguageChange = { vm.language = it },
+                        modelStatus = model.status,
+                        modelLoading = model.loading,
+                        modelProgress = model.progress,
+                        modelReady = model.ready,
+                        onPrepareModel = { vm.prepareModel() },
+                        localTranscribing = transcription.running,
+                        transcriptionStatus = transcriptionStatus,
+                        transcriptionProgress = transcription.progress,
+                        localTranscript = transcription.transcript,
+                        cloudBusy = vm.cloudBusy,
+                        cloudStatus = vm.cloudStatus,
+                        cloudJob = vm.cloudJob,
+                        onLocalTranscribe = { vm.startLocalTranscription() },
+                        onCloudTranscribe = { vm.startSharedGpuTranscription() },
+                        onCancelLocal = { vm.cancelLocalTranscription() },
+                        canTranscribe = vm.selectedUri != null && !recording.active
+                    )
+                }
                 WorkspaceTab.HISTORY -> HistoryContent(
-                    items = history,
-                    filter = historyFilter,
-                    onFilterChange = { historyFilter = it },
-                    loading = historyLoading,
-                    error = historyError,
-                    onRefresh = { refreshNow() },
-                    onOpen = ::openRecording,
-                    currentMeeting = currentMeeting,
-                    currentLocalRecord = currentLocalRecord,
-                    meetingNotes = meetingNotes,
-                    notesBusy = notesBusy,
-                    notesStatus = meetingNotesStatus,
-                    onLoadNotes = { runNotes(false) },
-                    onGenerateNotes = { runNotes(true) }
+                    modifier = Modifier.weight(1f),
+                    recordings = vm.history,
+                    filter = vm.historyFilter,
+                    onFilterChange = { vm.historyFilter = it },
+                    loading = vm.historyLoading,
+                    error = vm.historyError,
+                    onRefresh = { vm.refreshHistory() },
+                    onOpen = vm::openRecording,
+                    currentMeeting = vm.currentMeeting,
+                    currentLocalRecord = vm.currentLocalRecord,
+                    meetingNotes = vm.meetingNotes,
+                    notesBusy = vm.notesBusy,
+                    notesStatus = vm.meetingNotesStatus,
+                    onLoadNotes = { vm.loadNotes() },
+                    onGenerateNotes = { vm.generateNotes() }
                 )
             }
-            Spacer(Modifier.height(8.dp))
-            Footer()
         }
+    }
+}
+
+/** Scrollable tab body that fills the remaining height; History uses a LazyColumn instead. */
+@Composable
+private fun ColumnScope.ScrollingTab(content: @Composable ColumnScope.() -> Unit) {
+    Column(
+        modifier = Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        content()
+        Spacer(Modifier.height(8.dp))
+        Footer()
     }
 }
 
@@ -1302,9 +794,16 @@ private fun TranscribeContent(
     }
 }
 
+private const val HISTORY_DETAIL_INDEX = 3 // header, stats, filters, then the opened transcript
+
+/**
+ * Lazily composed list: only the rows on screen are built, so hundreds of recordings stay smooth.
+ * An opened transcript sits above the list and is scrolled into view.
+ */
 @Composable
 private fun HistoryContent(
-    items: List<RecordingItem>,
+    modifier: Modifier,
+    recordings: List<RecordingItem>,
     filter: HistoryFilter,
     onFilterChange: (HistoryFilter) -> Unit,
     loading: Boolean,
@@ -1319,105 +818,133 @@ private fun HistoryContent(
     onLoadNotes: () -> Unit,
     onGenerateNotes: () -> Unit
 ) {
-    val completed = items.count { it.status == "succeeded" }
-    val processing = items.count { it.status == "queued" || it.status == "processing" }
-    val attention = items.count { it.status == "failed" || it.status == "upload_pending" || it.isLocalOnly }
-    Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text("My recordings", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                Text("Your uploads and locally transcribed meetings.", color = Muted, style = MaterialTheme.typography.bodySmall)
-            }
-            OutlinedButton(onClick = onRefresh, enabled = !loading) {
-                androidx.compose.material3.Icon(Icons.Default.Refresh, null, modifier = Modifier.size(16.dp))
-                Spacer(Modifier.width(5.dp))
-                Text("Refresh")
+    val completed = recordings.count { it.status == "succeeded" }
+    val processing = recordings.count { it.status == "queued" || it.status == "processing" }
+    val attention = recordings.count { it.status == "failed" || it.status == "upload_pending" || it.isLocalOnly }
+    val filtered = remember(recordings, filter) {
+        recordings.filter { entry ->
+            when (filter) {
+                HistoryFilter.ALL -> true
+                HistoryFilter.PROCESSING -> entry.status == "queued" || entry.status == "processing"
+                HistoryFilter.COMPLETED -> entry.status == "succeeded"
+                HistoryFilter.ATTENTION -> entry.status == "failed" || entry.status == "upload_pending" || entry.isLocalOnly
             }
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            StatCard("All", items.size.toString(), Icons.Default.LibraryMusic, Modifier.weight(1f))
-            StatCard("Ready", completed.toString(), Icons.Default.CheckCircle, Modifier.weight(1f))
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            StatCard("Processing", processing.toString(), Icons.Default.AccessTime, Modifier.weight(1f))
-            StatCard("Attention", attention.toString(), Icons.Default.Refresh, Modifier.weight(1f))
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            HistoryFilter.entries.forEach { item ->
-                FilterChip(
-                    selected = filter == item,
-                    onClick = { onFilterChange(item) },
-                    label = { Text(item.name.lowercase().replaceFirstChar { it.uppercase() }) }
-                )
-            }
-        }
-        if (error.isNotBlank()) InfoMessage(error, AmberTint, Amber)
-        if (loading && items.isEmpty()) {
-            Row(Modifier.fillMaxWidth().padding(22.dp), horizontalArrangement = Arrangement.Center) {
-                CircularProgressIndicator(color = Blue)
-            }
-        } else {
-            val filtered = items.filter { item ->
-                when (filter) {
-                    HistoryFilter.ALL -> true
-                    HistoryFilter.PROCESSING -> item.status == "queued" || item.status == "processing"
-                    HistoryFilter.COMPLETED -> item.status == "succeeded"
-                    HistoryFilter.ATTENTION -> item.status == "failed" || item.status == "upload_pending" || item.isLocalOnly
+    }
+    val listState = rememberLazyListState()
+    LaunchedEffect(currentMeeting?.meetingId, currentLocalRecord?.eventId) {
+        if (currentMeeting != null || currentLocalRecord != null) listState.animateScrollToItem(HISTORY_DETAIL_INDEX)
+    }
+
+    LazyColumn(
+        modifier = modifier.fillMaxWidth(),
+        state = listState,
+        contentPadding = PaddingValues(vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        item(key = "header") {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("My recordings", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                    Text("Your uploads and locally transcribed meetings.", color = Muted, style = MaterialTheme.typography.bodySmall)
+                }
+                OutlinedButton(onClick = onRefresh, enabled = !loading) {
+                    androidx.compose.material3.Icon(Icons.Default.Refresh, null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(5.dp))
+                    Text("Refresh")
                 }
             }
-            if (filtered.isEmpty()) {
+        }
+        item(key = "stats") {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    StatCard("All", recordings.size.toString(), Icons.Default.LibraryMusic, Modifier.weight(1f))
+                    StatCard("Ready", completed.toString(), Icons.Default.CheckCircle, Modifier.weight(1f))
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    StatCard("Processing", processing.toString(), Icons.Default.AccessTime, Modifier.weight(1f))
+                    StatCard("Attention", attention.toString(), Icons.Default.Refresh, Modifier.weight(1f))
+                }
+            }
+        }
+        item(key = "filters") {
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                HistoryFilter.entries.forEach { option ->
+                    FilterChip(
+                        selected = filter == option,
+                        onClick = { onFilterChange(option) },
+                        label = { Text(option.name.lowercase().replaceFirstChar { it.uppercase() }) }
+                    )
+                }
+            }
+        }
+        if (currentMeeting != null) {
+            item(key = "meeting") {
+                WorkspaceCard {
+                    PanelHeading(Icons.Default.AudioFile, currentMeeting.title, "Transcript and meeting intelligence.", "MEETING DETAIL")
+                    Text(
+                        currentMeeting.transcript.ifBlank { "Transcript unavailable." },
+                        color = Ink,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Text(
+                        listOfNotNull(currentMeeting.source, currentMeeting.language, currentMeeting.model).joinToString(" · "),
+                        color = Muted,
+                        style = MaterialTheme.typography.labelSmall
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = onLoadNotes, enabled = !notesBusy, modifier = Modifier.weight(1f)) {
+                            Text("Load notes")
+                        }
+                        Button(onClick = onGenerateNotes, enabled = !notesBusy, modifier = Modifier.weight(1f)) {
+                            if (notesBusy) CircularProgressIndicator(Modifier.size(16.dp), color = Color.White, strokeWidth = 2.dp)
+                            else Text(if (meetingNotes != null) "Regenerate notes" else "Generate notes")
+                        }
+                    }
+                    if (notesStatus.isNotBlank()) {
+                        Text(notesStatus, color = Muted, style = MaterialTheme.typography.bodySmall)
+                        if (notesBusy) LinearProgressIndicator(Modifier.fillMaxWidth(), color = Blue)
+                    }
+                    meetingNotes?.let { NotesContent(it) }
+                }
+            }
+        } else if (currentLocalRecord != null) {
+            item(key = "local") {
+                WorkspaceCard {
+                    PanelHeading(Icons.Default.Lock, currentLocalRecord.title, "Saved privately on this device.", "LOCAL TRANSCRIPT")
+                    Text(currentLocalRecord.transcript, color = Ink, style = MaterialTheme.typography.bodyMedium)
+                    InfoMessage("This transcript has not synced to your online workspace yet. It will retry when connectivity is available.", AmberTint, Amber)
+                }
+            }
+        }
+        if (error.isNotBlank()) {
+            item(key = "error") { InfoMessage(error, AmberTint, Amber) }
+        }
+        if (loading && recordings.isEmpty()) {
+            item(key = "loading") {
+                Row(Modifier.fillMaxWidth().padding(22.dp), horizontalArrangement = Arrangement.Center) {
+                    CircularProgressIndicator(color = Blue)
+                }
+            }
+        } else if (filtered.isEmpty()) {
+            item(key = "empty") {
                 WorkspaceCard {
                     androidx.compose.material3.Icon(Icons.Default.AudioFile, null, tint = Muted, modifier = Modifier.size(25.dp))
-                    Text(if (items.isEmpty()) "No recordings yet" else "No recordings in this view", fontWeight = FontWeight.SemiBold)
+                    Text(if (recordings.isEmpty()) "No recordings yet" else "No recordings in this view", fontWeight = FontWeight.SemiBold)
                     Text(
-                        if (items.isEmpty()) "Record or upload audio from the Transcribe tab. It will appear here with its status and transcript."
+                        if (recordings.isEmpty()) "Record or upload audio from the Transcribe tab. It will appear here with its status and transcript."
                         else "Choose another filter to view your recordings.",
                         color = Muted,
                         style = MaterialTheme.typography.bodySmall
                     )
                 }
-            } else {
-                filtered.forEach { item ->
-                    RecordingRow(item = item, onClick = { onOpen(item) })
-                }
+            }
+        } else {
+            items(filtered, key = { it.id }) { entry ->
+                RecordingRow(item = entry, onClick = { onOpen(entry) })
             }
         }
-
-        if (currentMeeting != null) {
-            WorkspaceCard {
-                PanelHeading(Icons.Default.AudioFile, currentMeeting.title, "Transcript and meeting intelligence.", "MEETING DETAIL")
-                Text(
-                    currentMeeting.transcript.ifBlank { "Transcript unavailable." },
-                    color = Ink,
-                    style = MaterialTheme.typography.bodyMedium
-                )
-                Text(
-                    listOfNotNull(currentMeeting.source, currentMeeting.language, currentMeeting.model).joinToString(" · "),
-                    color = Muted,
-                    style = MaterialTheme.typography.labelSmall
-                )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = onLoadNotes, enabled = !notesBusy, modifier = Modifier.weight(1f)) {
-                        Text("Load notes")
-                    }
-                    Button(onClick = onGenerateNotes, enabled = !notesBusy, modifier = Modifier.weight(1f)) {
-                        if (notesBusy) CircularProgressIndicator(Modifier.size(16.dp), color = Color.White, strokeWidth = 2.dp)
-                        else Text(if (meetingNotes != null) "Regenerate notes" else "Generate notes")
-                    }
-                }
-                if (notesStatus.isNotBlank()) {
-                    Text(notesStatus, color = Muted, style = MaterialTheme.typography.bodySmall)
-                    if (notesBusy) LinearProgressIndicator(Modifier.fillMaxWidth(), color = Blue)
-                }
-                meetingNotes?.let { NotesContent(it) }
-            }
-        } else if (currentLocalRecord != null) {
-            WorkspaceCard {
-                PanelHeading(Icons.Default.Lock, currentLocalRecord.title, "Saved privately on this device.", "LOCAL TRANSCRIPT")
-                Text(currentLocalRecord.transcript, color = Ink, style = MaterialTheme.typography.bodyMedium)
-                InfoMessage("This transcript has not synced to your online workspace yet. It will retry when connectivity is available.", AmberTint, Amber)
-            }
-        }
+        item(key = "footer") { Footer() }
     }
 }
 
@@ -1628,24 +1155,3 @@ private fun languageLabel(code: String): String = when (code) {
     else -> code
 }
 
-private fun queryDisplayName(context: Context, uri: Uri): String? =
-    context.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
-        if (cursor.moveToFirst()) cursor.getString(0) else null
-    }
-
-private fun resolveContentType(context: Context, uri: Uri, name: String): String {
-    val reported = context.contentResolver.getType(uri)?.lowercase(Locale.ROOT).orEmpty()
-    if (reported.startsWith("audio/")) return reported
-    val extension = name.substringAfterLast('.', "").lowercase(Locale.ROOT)
-    return when (extension) {
-        "mp3" -> "audio/mpeg"
-        "mp4", "m4a" -> "audio/mp4"
-        "wav" -> "audio/wav"
-        "webm" -> "audio/webm"
-        "ogg" -> "audio/ogg"
-        "flac" -> "audio/flac"
-        "aac" -> "audio/aac"
-        "3gp" -> "audio/3gpp"
-        else -> "application/octet-stream"
-    }
-}

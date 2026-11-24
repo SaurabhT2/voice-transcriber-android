@@ -6,6 +6,7 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
 import org.json.JSONArray
+import org.json.JSONException
 import org.json.JSONObject
 import java.io.File
 import java.io.IOException
@@ -19,8 +20,14 @@ import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
+import java.security.GeneralSecurityException
 
 /**
  * Public client configuration shared with the web application.
@@ -34,14 +41,6 @@ object WorkspaceConfig {
     const val AUDIO_BUCKET = "meeting-audio"
     const val AUTH_REDIRECT_URI = "meetingworkspace://auth/callback"
 }
-
-data class UserSession(
-    val accessToken: String,
-    val refreshToken: String,
-    val expiresAtEpochSeconds: Long,
-    val userId: String,
-    val email: String
-)
 
 data class RecordingItem(
     val id: String,
@@ -75,23 +74,14 @@ data class MeetingDetail(
     val createdAt: String
 )
 
-class SecureSessionStore(context: Context) {
-    private val preferences = context.applicationContext.getSharedPreferences(
-        "meeting_workspace_session", Context.MODE_PRIVATE
-    )
-    private val alias = "meeting_workspace_session_key"
-
-    private fun encryptionKey(): SecretKey {
+/** AES-GCM encryption with a non-exportable Android Keystore key. */
+internal class KeystoreBox(private val alias: String) {
+    private fun key(): SecretKey {
         val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-        if (keyStore.containsAlias(alias)) {
-            return keyStore.getKey(alias, null) as SecretKey
-        }
+        if (keyStore.containsAlias(alias)) return keyStore.getKey(alias, null) as SecretKey
         val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
         generator.init(
-            KeyGenParameterSpec.Builder(
-                alias,
-                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
-            )
+            KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
                 .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
                 .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
                 .setRandomizedEncryptionRequired(true)
@@ -100,32 +90,47 @@ class SecureSessionStore(context: Context) {
         return generator.generateKey()
     }
 
-    fun save(session: UserSession) {
+    fun encrypt(plain: String): String {
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.ENCRYPT_MODE, key())
+        val encrypted = cipher.doFinal(plain.toByteArray(StandardCharsets.UTF_8))
+        return Base64.encodeToString(cipher.iv + encrypted, Base64.NO_WRAP)
+    }
+
+    /** @throws GeneralSecurityException if the key is gone or the data was tampered with. */
+    fun decrypt(encoded: String): String {
+        val payload = Base64.decode(encoded, Base64.NO_WRAP)
+        if (payload.size <= 12) throw GeneralSecurityException("Stored value is too short.")
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(128, payload.copyOfRange(0, 12)))
+        return String(cipher.doFinal(payload.copyOfRange(12, payload.size)), StandardCharsets.UTF_8)
+    }
+}
+
+class SecureSessionStore(context: Context) : SessionPersistence {
+    private val preferences = context.applicationContext.getSharedPreferences(
+        "meeting_workspace_session", Context.MODE_PRIVATE
+    )
+    private val box = KeystoreBox("meeting_workspace_session_key")
+
+    override fun save(session: UserSession) {
         val json = JSONObject()
             .put("access_token", session.accessToken)
             .put("refresh_token", session.refreshToken)
             .put("expires_at", session.expiresAtEpochSeconds)
             .put("user_id", session.userId)
             .put("email", session.email)
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.ENCRYPT_MODE, encryptionKey())
-        val encrypted = cipher.doFinal(json.toString().toByteArray(StandardCharsets.UTF_8))
-        val payload = cipher.iv + encrypted
-        preferences.edit()
-            .putString("session", Base64.encodeToString(payload, Base64.NO_WRAP))
-            .apply()
+        preferences.edit().putString("session", box.encrypt(json.toString())).apply()
     }
 
-    fun load(): UserSession? {
+    /**
+     * Returns null when nothing usable is stored. Only data that can never be read again
+     * (key invalidated, corrupted ciphertext) is deleted; a transient Keystore hiccup keeps it.
+     */
+    override fun load(): UserSession? {
         val encoded = preferences.getString("session", null) ?: return null
         return try {
-            val payload = Base64.decode(encoded, Base64.NO_WRAP)
-            if (payload.size <= 12) return null
-            val iv = payload.copyOfRange(0, 12)
-            val encrypted = payload.copyOfRange(12, payload.size)
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.DECRYPT_MODE, encryptionKey(), GCMParameterSpec(128, iv))
-            val json = JSONObject(String(cipher.doFinal(encrypted), StandardCharsets.UTF_8))
+            val json = JSONObject(box.decrypt(encoded))
             UserSession(
                 accessToken = json.getString("access_token"),
                 refreshToken = json.optString("refresh_token"),
@@ -133,38 +138,110 @@ class SecureSessionStore(context: Context) {
                 userId = json.getString("user_id"),
                 email = json.optString("email")
             )
+        } catch (_: GeneralSecurityException) {
+            clear(); null
+        } catch (_: JSONException) {
+            clear(); null
+        } catch (_: IllegalArgumentException) {
+            clear(); null
         } catch (_: Exception) {
-            clear()
+            null
+        }
+    }
+
+    override fun clear() {
+        preferences.edit().remove("session").apply()
+    }
+}
+
+/** Holds the PKCE code verifier between "email me a link" and "link opened". */
+class PkceVerifierStore(context: Context) {
+    private val preferences = context.applicationContext.getSharedPreferences(
+        "meeting_workspace_pkce", Context.MODE_PRIVATE
+    )
+    private val box = KeystoreBox("meeting_workspace_session_key")
+
+    fun save(verifier: String) {
+        val json = JSONObject().put("v", verifier).put("t", System.currentTimeMillis())
+        preferences.edit().putString("pending", box.encrypt(json.toString())).apply()
+    }
+
+    fun load(): String? {
+        val encoded = preferences.getString("pending", null) ?: return null
+        return try {
+            val json = JSONObject(box.decrypt(encoded))
+            if (System.currentTimeMillis() - json.getLong("t") > MAX_AGE_MS) { clear(); null }
+            else json.getString("v")
+        } catch (_: Exception) {
             null
         }
     }
 
     fun clear() {
-        preferences.edit().remove("session").apply()
+        preferences.edit().remove("pending").apply()
+    }
+
+    private companion object {
+        const val MAX_AGE_MS = 60L * 60L * 1000L
     }
 }
 
 /**
  * Uses the same Supabase Auth project and versioned FastAPI contract as the web client.
- * Network calls are dispatched to IO; session credentials are encrypted with Android Keystore.
+ *
+ * Authentication is handled centrally: every authenticated call goes through [authed], which
+ * refreshes an expiring token first, and on a 401 refreshes once and retries once. The saved
+ * session is only discarded when the auth server explicitly rejects the refresh token, never
+ * because the device happens to be offline.
  */
 class WorkspaceBackend(context: Context) {
     private val appContext = context.applicationContext
     private val sessionStore = SecureSessionStore(appContext)
+    private val pkceStore = PkceVerifierStore(appContext)
     private val devicePreferences = appContext.getSharedPreferences("meeting_workspace_device", Context.MODE_PRIVATE)
+    private val sessions = SessionManager(
+        persistence = sessionStore,
+        refresher = { current ->
+            withContext(Dispatchers.IO) {
+                requestJson(
+                    "POST",
+                    WorkspaceConfig.SUPABASE_URL + "/auth/v1/token?grant_type=refresh_token",
+                    headers = publicHeaders,
+                    body = JSONObject().put("refresh_token", current.refreshToken)
+                )
+            }.toSession(previous = current)
+        }
+    )
+
+    private val publicHeaders get() = mapOf("apikey" to WorkspaceConfig.SUPABASE_PUBLISHABLE_KEY)
+
+    /** The saved user id without touching the network, or null when signed out. */
+    suspend fun savedUserId(): String? = sessions.active()?.userId
 
     suspend fun sendMagicLink(email: String) = withContext(Dispatchers.IO) {
+        val pkce = Pkce.generate()
         val redirect = URLEncoder.encode(WorkspaceConfig.AUTH_REDIRECT_URI, "UTF-8")
-        val body = JSONObject().put("email", email.trim()).put("create_user", true)
+        val body = JSONObject()
+            .put("email", email.trim())
+            .put("create_user", true)
+            .put("code_challenge", pkce.challenge)
+            .put("code_challenge_method", "s256")
         requestJson(
             "POST",
             WorkspaceConfig.SUPABASE_URL + "/auth/v1/otp?redirect_to=" + redirect,
-            headers = mapOf("apikey" to WorkspaceConfig.SUPABASE_PUBLISHABLE_KEY),
+            headers = publicHeaders,
             body = body
         )
+        // Saved only after the request succeeded so a failure cannot clobber a pending link.
+        pkceStore.save(pkce.verifier)
         Unit
     }
 
+    /**
+     * Completes the PKCE flow: the emailed link carries a one-time `code` that is useless without
+     * the verifier that only this device holds, so another app that intercepts the custom-scheme
+     * link cannot sign anyone in with it.
+     */
     suspend fun completeMagicLink(callback: Uri): UserSession = withContext(Dispatchers.IO) {
         val parameters = linkedMapOf<String, String>()
         callback.queryParameterNames.forEach { name ->
@@ -172,129 +249,89 @@ class WorkspaceBackend(context: Context) {
         }
         val fragment = callback.fragment.orEmpty().removePrefix("#")
         if (fragment.isNotBlank()) {
+            // Auth errors (expired link etc.) arrive in the fragment. Never read tokens from here.
             val fragmentUri = Uri.parse("https://callback.invalid/?" + fragment)
             fragmentUri.queryParameterNames.forEach { name ->
-                fragmentUri.getQueryParameter(name)?.let { parameters[name] = it }
+                if (name.startsWith("error")) fragmentUri.getQueryParameter(name)?.let { parameters[name] = it }
             }
         }
         val authError = parameters["error_description"] ?: parameters["error"]
         if (!authError.isNullOrBlank()) throw IOException(authError.replace('+', ' '))
-        val accessToken = parameters["access_token"]
-            ?: throw IOException(
-                if (parameters.containsKey("code")) {
-                    "The sign-in link returned an authorization code instead of a session. Check the mobile email-link flow configuration."
-                } else {
-                    "The sign-in link did not contain a session. Open the newest link from your email."
-                }
-            )
-        val refreshToken = parameters["refresh_token"].orEmpty()
-        val expiresIn = parameters["expires_in"]?.toLongOrNull() ?: 3600L
-        val expiresAt = parameters["expires_at"]?.toLongOrNull()
-            ?: (System.currentTimeMillis() / 1000L) + expiresIn
-        val user = requestJson(
-            "GET",
-            WorkspaceConfig.SUPABASE_URL + "/auth/v1/user",
-            headers = mapOf("apikey" to WorkspaceConfig.SUPABASE_PUBLISHABLE_KEY),
-            bearerToken = accessToken
-        )
-        val session = UserSession(
-            accessToken = accessToken,
-            refreshToken = refreshToken,
-            expiresAtEpochSeconds = expiresAt,
-            userId = user.getString("id"),
-            email = user.optString("email")
-        )
-        sessionStore.save(session)
-        session
-    }
 
-    suspend fun restoreSession(): UserSession? = withContext(Dispatchers.IO) {
-        val current = sessionStore.load() ?: return@withContext null
-        val now = System.currentTimeMillis() / 1000L
-        if (current.expiresAtEpochSeconds > now + 90L) {
-            // The signed-in API validates the token. Keep the saved session usable offline
-            // instead of forcing a sign-in just because this device has no network.
-            return@withContext current
-        }
-        refreshSession(current)
-    }
+        val code = parameters["code"]?.takeIf { it.isNotBlank() }
+            ?: throw IOException("The sign-in link did not contain a valid code. Open the newest link from your email on this phone.")
+        val verifier = pkceStore.load()
+            ?: throw IOException("This sign-in link was requested on another device or has expired. Request a new link on this phone.")
 
-    private fun refreshSession(current: UserSession): UserSession? {
-        if (current.refreshToken.isBlank()) {
-            sessionStore.clear()
-            return null
-        }
-        return try {
-            val token = requestJson(
+        val token = try {
+            requestJson(
                 "POST",
-                WorkspaceConfig.SUPABASE_URL + "/auth/v1/token?grant_type=refresh_token",
-                headers = mapOf("apikey" to WorkspaceConfig.SUPABASE_PUBLISHABLE_KEY),
-                body = JSONObject().put("refresh_token", current.refreshToken)
+                WorkspaceConfig.SUPABASE_URL + "/auth/v1/token?grant_type=pkce",
+                headers = publicHeaders,
+                body = JSONObject().put("auth_code", code).put("code_verifier", verifier)
             )
-            val accessToken = token.getString("access_token")
-            val refreshToken = token.optString("refresh_token", current.refreshToken)
-            val expiresAt = token.optLong(
-                "expires_at",
-                (System.currentTimeMillis() / 1000L) + token.optLong("expires_in", 3600L)
-            )
-            val user = requestJson(
-                "GET",
-                WorkspaceConfig.SUPABASE_URL + "/auth/v1/user",
-                headers = mapOf("apikey" to WorkspaceConfig.SUPABASE_PUBLISHABLE_KEY),
-                bearerToken = accessToken
-            )
-            UserSession(
-                accessToken = accessToken,
-                refreshToken = refreshToken,
-                expiresAtEpochSeconds = expiresAt,
-                userId = user.getString("id"),
-                email = user.optString("email")
-            ).also(sessionStore::save)
-        } catch (_: Exception) {
-            sessionStore.clear()
-            null
+        } catch (error: HttpException) {
+            if (error.code in 400..499) pkceStore.clear() // the code is single-use; start over
+            throw error
         }
+        pkceStore.clear()
+        token.toSession(previous = null).also { saved -> sessions.adopt(saved) }
     }
 
-    suspend fun signOut(session: UserSession?) = withContext(Dispatchers.IO) {
+    /**
+     * Loads the saved session. If its token is (nearly) expired it is refreshed; when that fails
+     * only because the device is offline the saved session is still returned so local features
+     * keep working. Returns null only when signed out or the refresh token was rejected.
+     */
+    suspend fun restoreSession(): UserSession? = sessions.restore()
+
+    suspend fun signOut() {
+        val token = sessions.current()?.accessToken
         try {
-            if (session != null) {
-                requestText(
-                    "POST",
-                    WorkspaceConfig.SUPABASE_URL + "/auth/v1/logout",
-                    headers = mapOf(
-                        "apikey" to WorkspaceConfig.SUPABASE_PUBLISHABLE_KEY,
-                        "Authorization" to "Bearer " + session.accessToken
-                    )
-                )
+            if (token != null) {
+                withContext(Dispatchers.IO) {
+                    requestText("POST", WorkspaceConfig.SUPABASE_URL + "/auth/v1/logout", publicHeaders, bearerToken = token)
+                }
             }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Exception) {
+            // Best effort: signing out must work offline too.
         } finally {
-            sessionStore.clear()
+            sessions.invalidate()
         }
     }
 
-    suspend fun loadRecordings(session: UserSession): List<RecordingItem> = withContext(Dispatchers.IO) {
+    /** Runs an authenticated request; see [SessionManager.authed]. */
+    private suspend fun <T> authed(block: suspend (accessToken: String) -> T): T = sessions.authed(block)
+
+    suspend fun loadRecordings(): List<RecordingItem> {
+        val userId = sessions.active()?.userId ?: throw SessionExpiredException()
         val jobsUrl = Uri.parse(WorkspaceConfig.SUPABASE_URL + "/rest/v1/transcription_jobs")
             .buildUpon()
             .appendQueryParameter(
                 "select",
                 "id,status,source,filename,created_at,meeting_id,transcript_id,error_code"
             )
-            .appendQueryParameter("owner_id", "eq." + session.userId)
+            .appendQueryParameter("owner_id", "eq.$userId")
             .appendQueryParameter("order", "created_at.desc")
             .appendQueryParameter("limit", "100")
             .build().toString()
         val meetingsUrl = Uri.parse(WorkspaceConfig.SUPABASE_URL + "/rest/v1/meetings")
             .buildUpon()
             .appendQueryParameter("select", "id,title,source,created_at")
-            .appendQueryParameter("owner_id", "eq." + session.userId)
+            .appendQueryParameter("owner_id", "eq.$userId")
             .appendQueryParameter("order", "created_at.desc")
             .appendQueryParameter("limit", "100")
             .build().toString()
 
-        val headers = mapOf("apikey" to WorkspaceConfig.SUPABASE_PUBLISHABLE_KEY)
-        val jobs = JSONArray(requestText("GET", jobsUrl, headers, bearerToken = session.accessToken))
-        val meetings = JSONArray(requestText("GET", meetingsUrl, headers, bearerToken = session.accessToken))
+        val (jobsText, meetingsText) = coroutineScope {
+            val jobsRequest = async { authed { token -> requestText("GET", jobsUrl, publicHeaders, bearerToken = token) } }
+            val meetingsRequest = async { authed { token -> requestText("GET", meetingsUrl, publicHeaders, bearerToken = token) } }
+            jobsRequest.await() to meetingsRequest.await()
+        }
+        val jobs = JSONArray(jobsText)
+        val meetings = JSONArray(meetingsText)
         val meetingById = mutableMapOf<String, JSONObject>()
         for (index in 0 until meetings.length()) {
             val row = meetings.getJSONObject(index)
@@ -324,7 +361,7 @@ class WorkspaceBackend(context: Context) {
             val meetingId = row.getString("id")
             if (meetingId !in linkedMeetingIds) {
                 result += RecordingItem(
-                    id = "meeting:" + meetingId,
+                    id = "meeting:$meetingId",
                     title = row.optString("title", "Untitled meeting"),
                     status = "succeeded",
                     source = row.optString("source"),
@@ -334,16 +371,20 @@ class WorkspaceBackend(context: Context) {
                 )
             }
         }
-        result.sortedByDescending { it.createdAt }
+        return result.sortedByDescending { it.createdAt }
     }
 
+    /**
+     * Creates the job, uploads the audio and completes the upload. Each step is its own
+     * authenticated call, so a token refresh never re-creates the job.
+     */
     suspend fun createCloudUpload(
-        session: UserSession,
         file: File,
         fileName: String,
         contentType: String,
-        language: String?
-    ): CloudJob = withContext(Dispatchers.IO) {
+        language: String?,
+        onProgress: (sentBytes: Long, totalBytes: Long) -> Unit = { _, _ -> }
+    ): CloudJob {
         require(file.isFile && file.length() > 0L) { "The selected recording is empty or unavailable." }
         require(file.length() <= 50L * 1024L * 1024L) { "This workspace accepts audio files up to 50 MiB." }
         val createBody = JSONObject()
@@ -351,58 +392,45 @@ class WorkspaceBackend(context: Context) {
             .put("content_type", contentType)
             .put("source", "android_upload")
             .put("language", language ?: JSONObject.NULL)
-        val uploadSession = requestJson(
-            "POST",
-            WorkspaceConfig.API_BASE_URL + "/api/v1/transcriptions/upload",
-            bearerToken = session.accessToken,
-            body = createBody
-        )
+        val uploadSession = authed { token ->
+            requestJson("POST", WorkspaceConfig.API_BASE_URL + "/api/v1/transcriptions/upload", bearerToken = token, body = createBody)
+        }
         val jobId = uploadSession.getJSONObject("job").getString("job_id")
         val uploadUrl = uploadSession.getString("upload_url")
-        uploadSignedFile(uploadUrl, file, contentType, session.accessToken)
-
-        requestJson(
-            "POST",
-            WorkspaceConfig.API_BASE_URL + "/api/v1/transcriptions/" + jobId + "/complete-upload",
-            bearerToken = session.accessToken,
-            body = JSONObject()
-        ).toCloudJob()
+        authed { token -> uploadSignedFile(uploadUrl, file, contentType, token, onProgress) }
+        return authed { token ->
+            requestJson(
+                "POST",
+                WorkspaceConfig.API_BASE_URL + "/api/v1/transcriptions/$jobId/complete-upload",
+                bearerToken = token,
+                body = JSONObject()
+            )
+        }.toCloudJob()
     }
 
-    suspend fun getCloudJob(session: UserSession, jobId: String): CloudJob = withContext(Dispatchers.IO) {
-        requestJson(
-            "GET",
-            WorkspaceConfig.API_BASE_URL + "/api/v1/transcriptions/" + jobId,
-            bearerToken = session.accessToken
-        ).toCloudJob()
-    }
+    suspend fun getCloudJob(jobId: String): CloudJob = authed { token ->
+        requestJson("GET", WorkspaceConfig.API_BASE_URL + "/api/v1/transcriptions/$jobId", bearerToken = token)
+    }.toCloudJob()
 
-    suspend fun cancelCloudJob(session: UserSession, jobId: String): CloudJob = withContext(Dispatchers.IO) {
+    suspend fun cancelCloudJob(jobId: String): CloudJob = authed { token ->
         requestJson(
-            "POST",
-            WorkspaceConfig.API_BASE_URL + "/api/v1/transcriptions/" + jobId + "/cancel",
-            bearerToken = session.accessToken,
-            body = JSONObject()
-        ).toCloudJob()
-    }
+            "POST", WorkspaceConfig.API_BASE_URL + "/api/v1/transcriptions/$jobId/cancel",
+            bearerToken = token, body = JSONObject()
+        )
+    }.toCloudJob()
 
-    suspend fun getMeeting(session: UserSession, meetingId: String): MeetingDetail = withContext(Dispatchers.IO) {
-        requestJson(
-            "GET",
-            WorkspaceConfig.API_BASE_URL + "/api/v1/meetings/" + meetingId,
-            bearerToken = session.accessToken
-        ).toMeetingDetail()
-    }
+    suspend fun getMeeting(meetingId: String): MeetingDetail = authed { token ->
+        requestJson("GET", WorkspaceConfig.API_BASE_URL + "/api/v1/meetings/$meetingId", bearerToken = token)
+    }.toMeetingDetail()
 
     suspend fun syncOfflineTranscript(
-        session: UserSession,
         eventId: String,
         title: String,
         startedAt: String,
         endedAt: String,
         transcript: String,
         language: String?
-    ): String = withContext(Dispatchers.IO) {
+    ): String {
         val deviceId = devicePreferences.getString("device_id", null) ?: UUID.randomUUID().toString().also {
             devicePreferences.edit().putString("device_id", it).apply()
         }
@@ -414,90 +442,101 @@ class WorkspaceBackend(context: Context) {
             .put("ended_at", endedAt)
             .put("transcript", transcript)
             .put("language", language ?: JSONObject.NULL)
-            .put("model", "ggml-tiny-q5_1")
-        requestJson(
-            "POST",
-            WorkspaceConfig.API_BASE_URL + "/api/v1/meetings/sync",
-            bearerToken = session.accessToken,
-            body = body
-        ).getString("meeting_id")
+            .put("model", WhisperModelManager.MODEL_ID)
+        return authed { token ->
+            requestJson("POST", WorkspaceConfig.API_BASE_URL + "/api/v1/meetings/sync", bearerToken = token, body = body)
+        }.getString("meeting_id")
     }
 
-    suspend fun getMeetingNotes(session: UserSession, meetingId: String): JSONObject = withContext(Dispatchers.IO) {
+    suspend fun getMeetingNotes(meetingId: String): JSONObject = authed { token ->
+        requestJson("GET", WorkspaceConfig.API_BASE_URL + "/api/v1/meetings/$meetingId/notes", bearerToken = token)
+    }
+
+    suspend fun generateMeetingNotes(meetingId: String, regenerate: Boolean = false): JSONObject = authed { token ->
         requestJson(
-            "GET",
-            WorkspaceConfig.API_BASE_URL + "/api/v1/meetings/" + meetingId + "/notes",
-            bearerToken = session.accessToken
+            "POST", WorkspaceConfig.API_BASE_URL + "/api/v1/meetings/$meetingId/notes",
+            bearerToken = token, body = JSONObject().put("regenerate", regenerate)
         )
     }
 
-    suspend fun generateMeetingNotes(
-        session: UserSession,
-        meetingId: String,
-        regenerate: Boolean = false
-    ): JSONObject = withContext(Dispatchers.IO) {
-        requestJson(
-            "POST",
-            WorkspaceConfig.API_BASE_URL + "/api/v1/meetings/" + meetingId + "/notes",
-            bearerToken = session.accessToken,
-            body = JSONObject().put("regenerate", regenerate)
-        )
+    suspend fun getMeetingNotesStatus(meetingId: String): JSONObject = authed { token ->
+        requestJson("GET", WorkspaceConfig.API_BASE_URL + "/api/v1/meetings/$meetingId/notes/status", bearerToken = token)
     }
 
-    suspend fun getMeetingNotesStatus(session: UserSession, meetingId: String): JSONObject = withContext(Dispatchers.IO) {
-        requestJson(
-            "GET",
-            WorkspaceConfig.API_BASE_URL + "/api/v1/meetings/" + meetingId + "/notes/status",
-            bearerToken = session.accessToken
-        )
+    suspend fun getMeetingNotesJob(meetingId: String, jobId: String): JSONObject = authed { token ->
+        requestJson("GET", WorkspaceConfig.API_BASE_URL + "/api/v1/meetings/$meetingId/notes/jobs/$jobId", bearerToken = token)
     }
 
-    suspend fun getMeetingNotesJob(
-        session: UserSession,
-        meetingId: String,
-        jobId: String
-    ): JSONObject = withContext(Dispatchers.IO) {
-        requestJson(
-            "GET",
-            WorkspaceConfig.API_BASE_URL + "/api/v1/meetings/" + meetingId + "/notes/jobs/" + jobId,
-            bearerToken = session.accessToken
-        )
-    }
-
-    private fun uploadSignedFile(
+    private suspend fun uploadSignedFile(
         signedUrl: String,
         file: File,
         contentType: String,
-        accessToken: String
+        accessToken: String,
+        onProgress: (sentBytes: Long, totalBytes: Long) -> Unit
     ) {
         val target = if (signedUrl.startsWith("/")) {
             WorkspaceConfig.SUPABASE_URL + "/storage/v1" + signedUrl
         } else signedUrl
+        val total = file.length()
+        val coroutine = currentCoroutineContext()
         val connection = (URL(target).openConnection() as HttpURLConnection).apply {
             requestMethod = "PUT"
             connectTimeout = 30_000
             readTimeout = 120_000
             doOutput = true
-            setFixedLengthStreamingMode(file.length())
+            setFixedLengthStreamingMode(total)
             setRequestProperty("apikey", WorkspaceConfig.SUPABASE_PUBLISHABLE_KEY)
-            setRequestProperty("Authorization", "Bearer " + accessToken)
+            setRequestProperty("Authorization", "Bearer $accessToken")
             setRequestProperty("Content-Type", contentType)
             setRequestProperty("Cache-Control", "max-age=3600")
             setRequestProperty("x-upsert", "false")
         }
         try {
             file.inputStream().buffered().use { input ->
-                connection.outputStream.buffered().use { output -> input.copyTo(output) }
+                connection.outputStream.buffered().use { output ->
+                    val buffer = ByteArray(64 * 1024)
+                    var sent = 0L
+                    var lastReport = 0L
+                    while (true) {
+                        coroutine.ensureActive() // cancelling the coroutine aborts the upload
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        output.write(buffer, 0, count)
+                        sent += count
+                        if (sent - lastReport >= 256 * 1024 || sent == total) {
+                            lastReport = sent
+                            onProgress(sent, total)
+                        }
+                    }
+                }
             }
             val status = connection.responseCode
             val response = (if (status in 200..299) connection.inputStream else connection.errorStream)
                 ?.bufferedReader()?.use { it.readText() }.orEmpty()
             if (status !in 200..299) {
-                throw IOException("Audio upload failed (HTTP " + status + "): " + response.take(300))
+                throw HttpException(status, "Audio upload failed (HTTP $status): " + response.take(300))
             }
         } finally {
             connection.disconnect()
         }
+    }
+
+    private fun nowSeconds(): Long = System.currentTimeMillis() / 1000L
+
+    private fun JSONObject.toSession(previous: UserSession?): UserSession {
+        val user = optJSONObject("user")
+        val userId = user?.optString("id")?.takeIf { it.isNotBlank() }
+            ?: previous?.userId
+            ?: throw IOException("The sign-in response did not include a user.")
+        val expiresAt = optLong("expires_at", 0L).takeIf { it > 0L }
+            ?: (nowSeconds() + optLong("expires_in", 3600L))
+        return UserSession(
+            accessToken = getString("access_token"),
+            refreshToken = optString("refresh_token", previous?.refreshToken.orEmpty()),
+            expiresAtEpochSeconds = expiresAt,
+            userId = userId,
+            email = user?.optString("email")?.takeIf { it.isNotBlank() } ?: previous?.email.orEmpty()
+        )
     }
 
     private fun requestJson(
@@ -549,7 +588,7 @@ class WorkspaceBackend(context: Context) {
                 } catch (_: Exception) {
                     response.ifBlank { "Request failed (HTTP " + status + ")." }
                 }
-                throw IOException(message)
+                throw HttpException(status, message)
             }
             return response
         } finally {
@@ -577,6 +616,3 @@ class WorkspaceBackend(context: Context) {
         createdAt = optString("created_at")
     )
 }
-
-internal fun JSONObject.optNullableString(name: String): String? =
-    if (isNull(name)) null else optString(name).takeIf { it.isNotBlank() && it != "null" }

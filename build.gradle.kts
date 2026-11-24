@@ -26,10 +26,30 @@ val patchWhisperAutoLanguage = tasks.register("patchWhisperAutoLanguage") {
     }
 }
 
+// ABIs to build natively; keep in sync with app/build.gradle.kts. Override with -PwhisperAbis=...
+val whisperAbis = (providers.gradleProperty("whisperAbis").orNull ?: "arm64-v8a")
+    .split(",").map { it.trim() }.filter { it.isNotEmpty() }
+
 subprojects {
     if (name == "whisperlib") {
         afterEvaluate {
-            dependencies.add("implementation", "org.jetbrains.kotlinx:kotlinx-coroutines-core:1.7.2")
+            dependencies.add("implementation", "org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
+            extensions.findByType(com.android.build.gradle.LibraryExtension::class.java)?.apply {
+                defaultConfig {
+                    // Build only the ABIs we ship (the library would otherwise build all of them).
+                    ndk {
+                        abiFilters.clear()
+                        abiFilters.addAll(whisperAbis)
+                    }
+                    // Android 15+ devices may use 16 KB memory pages; Google Play requires
+                    // native libraries to be aligned for them.
+                    externalNativeBuild {
+                        cmake {
+                            arguments("-DCMAKE_SHARED_LINKER_FLAGS=-Wl,-z,max-page-size=16384")
+                        }
+                    }
+                }
+            }
         }
     }
     tasks.configureEach {
