@@ -36,9 +36,9 @@ jobs:
           path: |
             ${{ env.ANDROID_HOME }}/ndk
             ${{ env.ANDROID_HOME }}/cmake
-          key: android-native-${{ runner.os }}-ndk25.2.9519653-cmake3.22.1
+          key: android-native-${{ runner.os }}-ndk28.0.13004108-cmake3.22.1
       - name: Install Android SDK, NDK and CMake
-        run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;25.2.9519653" "cmake;3.22.1"
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;28.0.13004108" "cmake;3.22.1"
       - name: Run unit tests
         run: ./gradlew testDebugUnitTest
       - name: Lint
