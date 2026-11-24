@@ -70,6 +70,11 @@ internal class SessionManager(
             throw error
         } catch (_: IOException) {
             stored
+        } catch (_: HttpException) {
+            // A transient auth-service response (for example 429 or 5xx) is not proof
+            // that the refresh token is invalid. Preserve the local session; the next
+            // authenticated request can retry refresh when connectivity/service recovers.
+            stored
         }
     }
 
