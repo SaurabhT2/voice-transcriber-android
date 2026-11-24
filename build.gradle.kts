@@ -43,9 +43,13 @@ subprojects {
                     }
                     // Android 15+ devices may use 16 KB memory pages; Google Play requires
                     // native libraries to be aligned for them.
+                    // -static-openmp links the OpenMP runtime into libwhisper*.so. Otherwise
+                    // AGP packages the NDK's prebuilt libomp.so, which is 4 KB-aligned in
+                    // NDK 25 and cannot be fixed with a linker flag. (Alternative: move to
+                    // NDK r28+, whose prebuilt libraries are 16 KB-aligned.)
                     externalNativeBuild {
                         cmake {
-                            arguments("-DCMAKE_SHARED_LINKER_FLAGS=-Wl,-z,max-page-size=16384")
+                            arguments("-DCMAKE_SHARED_LINKER_FLAGS=-Wl,-z,max-page-size=16384 -static-openmp")
                         }
                     }
                 }
