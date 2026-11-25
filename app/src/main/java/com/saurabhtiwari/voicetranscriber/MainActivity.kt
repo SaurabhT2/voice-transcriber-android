@@ -882,11 +882,7 @@ private fun HistoryContent(
             item(key = "meeting") {
                 WorkspaceCard {
                     PanelHeading(Icons.Default.AudioFile, currentMeeting.title, "Transcript and meeting intelligence.", "MEETING DETAIL")
-                    Text(
-                        currentMeeting.transcript.ifBlank { "Transcript unavailable." },
-                        color = Ink,
-                        style = MaterialTheme.typography.bodyMedium
-                    )
+                    TranscriptBody(currentMeeting)
                     Text(
                         listOfNotNull(currentMeeting.source, currentMeeting.language, currentMeeting.model).joinToString(" · "),
                         color = Muted,
