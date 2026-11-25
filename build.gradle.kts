@@ -26,10 +26,34 @@ val patchWhisperAutoLanguage = tasks.register("patchWhisperAutoLanguage") {
     }
 }
 
+// ABIs to build natively; keep in sync with app/build.gradle.kts. Override with -PwhisperAbis=...
+val whisperAbis = (providers.gradleProperty("whisperAbis").orNull ?: "arm64-v8a")
+    .split(",").map { it.trim() }.filter { it.isNotEmpty() }
+
 subprojects {
     if (name == "whisperlib") {
         afterEvaluate {
-            dependencies.add("implementation", "org.jetbrains.kotlinx:kotlinx-coroutines-core:1.7.2")
+            dependencies.add("implementation", "org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
+            extensions.findByType(com.android.build.gradle.LibraryExtension::class.java)?.apply {
+                // The upstream whisper.android module pins NDK r25. Override it with r28,
+                // whose packaged native runtimes (including libomp.so) support 16 KB pages.
+                ndkVersion = "28.0.13004108"
+                defaultConfig {
+                    // Build only the ABIs we ship (the library would otherwise build all of them).
+                    ndk {
+                        abiFilters.clear()
+                        abiFilters.addAll(whisperAbis)
+                    }
+                    // Android 15+ devices may use 16 KB memory pages; Google Play requires
+                    // native libraries to be aligned for them.
+                    externalNativeBuild {
+                        cmake {
+                            // Align newly linked Whisper/GGML shared libraries for 16 KB pages.
+                            arguments("-DCMAKE_SHARED_LINKER_FLAGS=-Wl,-z,max-page-size=16384")
+                        }
+                    }
+                }
+            }
         }
     }
     tasks.configureEach {

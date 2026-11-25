@@ -4,14 +4,19 @@ on:
   push:
     branches: [main, "feature/**"]
   pull_request:
-    branches: [main]
+    branches: [main, "feature/**"]
 
 permissions:
   contents: read
 
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
@@ -21,18 +26,28 @@ jobs:
           distribution: temurin
           java-version: "17"
       - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "8.9"
       - uses: android-actions/setup-android@v3
         with:
           # The legacy "tools" SDK package is retired and makes sdkmanager fail.
           packages: "platform-tools"
+      - name: Cache NDK and CMake
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.ANDROID_HOME }}/ndk
+            ${{ env.ANDROID_HOME }}/cmake
+          key: android-native-${{ runner.os }}-ndk28.0.13004108-cmake3.22.1
       - name: Install Android SDK, NDK and CMake
-        run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;25.2.9519653" "cmake;3.22.1"
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;28.0.13004108" "cmake;3.22.1"
       - name: Run unit tests
-        run: gradle testDebugUnitTest
+        run: ./gradlew testDebugUnitTest
+      - name: Lint
+        run: ./gradlew lintDebug
+        continue-on-error: true # advisory until the existing findings are triaged
       - name: Assemble debug APK
-        run: gradle assembleDebug
+        run: ./gradlew assembleDebug
+      - name: Verify native libraries are 16 KB aligned
+        run: ./scripts/check-16kb-alignment.sh app/build/outputs/apk/debug/app-debug.apk
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
