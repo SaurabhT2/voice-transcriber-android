@@ -944,6 +944,69 @@ private fun HistoryContent(
     }
 }
 
+private val SpeakerPalette = listOf(Blue, Green, Violet, Amber, Color(0xFFC2410C), Color(0xFF0E7490))
+
+private fun speakerColor(index: Int): Color =
+    if (index < 0) Muted else SpeakerPalette[index % SpeakerPalette.size]
+
+/** Speaker-attributed transcript when the server returned speaker labels; plain text otherwise. */
+@Composable
+private fun TranscriptBody(meeting: MeetingDetail) {
+    val parsed = remember(meeting.meetingId, meeting.segments, meeting.speakers) {
+        SpeakerTranscripts.build(meeting.segments, meeting.speakers)
+    }
+    if (!parsed.hasSpeakers) {
+        Text(
+            meeting.transcript.ifBlank { "Transcript unavailable." },
+            color = Ink,
+            style = MaterialTheme.typography.bodyMedium
+        )
+        return
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("SPEAKERS", color = Muted, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+            parsed.speakers.forEach { speaker ->
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Box(Modifier.size(10.dp).clip(CircleShape).background(speakerColor(speaker.colorIndex)))
+                    Text(speaker.label, color = Ink, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
+                    Text("${(speaker.share * 100).toInt()}%", color = Muted, style = MaterialTheme.typography.labelSmall)
+                }
+                LinearProgressIndicator(
+                    progress = { speaker.share.toFloat().coerceIn(0f, 1f) },
+                    modifier = Modifier.fillMaxWidth(),
+                    color = speakerColor(speaker.colorIndex),
+                    trackColor = Border
+                )
+            }
+        }
+        parsed.turns.forEach { turn ->
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        turn.label ?: "Unlabeled",
+                        color = speakerColor(turn.colorIndex),
+                        fontWeight = FontWeight.SemiBold,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Text(
+                        SpeakerTranscripts.formatTimestamp(turn.startSeconds),
+                        color = Muted,
+                        style = MaterialTheme.typography.labelSmall
+                    )
+                }
+                Text(turn.text, color = Ink, style = MaterialTheme.typography.bodyMedium)
+            }
+        }
+    }
+}
+
 @Composable
 private fun RecordingRow(item: RecordingItem, onClick: () -> Unit) {
     WorkspaceCard {
