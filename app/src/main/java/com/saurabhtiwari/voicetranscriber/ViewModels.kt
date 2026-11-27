@@ -126,8 +126,12 @@ class MeetingViewModel(app: Application, private val ownerId: String) : AndroidV
 
     val modelState: StateFlow<ModelState> = transcriber.model
     val transcriptionState: StateFlow<TranscriptionState> = transcriber.state
+    val liveState: StateFlow<LiveState> = services.live.state
 
     var tab by mutableStateOf(WorkspaceTab.OVERVIEW)
+
+    /** Stream the recording to the worker for live text (beta). Chosen before recording starts. */
+    var liveTranscript by mutableStateOf(false)
 
     var history by mutableStateOf(emptyList<RecordingItem>())
         private set
@@ -214,7 +218,7 @@ class MeetingViewModel(app: Application, private val ownerId: String) : AndroidV
         recordingError = ""
         tab = WorkspaceTab.TRANSCRIBE
         try {
-            RecordingService.start(appContext)
+            RecordingService.start(appContext, liveTranscript, if (language == "auto") null else language)
         } catch (error: Exception) {
             recordingError = error.message ?: "Unable to start recording. Check microphone access."
         }

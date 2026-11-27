@@ -12,6 +12,7 @@ class WorkspaceServices private constructor(context: Context) {
     val store = LocalMeetingStore(File(context.filesDir, "local_meetings"))
     val sync = SyncCoordinator(backend, store)
     val transcriber = LocalTranscriber(context, store)
+    val live = LiveStreamer(context, backend)
 
     companion object {
         @Volatile

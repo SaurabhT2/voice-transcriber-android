@@ -69,6 +69,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
@@ -255,6 +256,7 @@ private fun MeetingWorkspaceScreen(
     val recording by RecordingController.state.collectAsStateWithLifecycle()
     val model by vm.modelState.collectAsStateWithLifecycle()
     val transcription by vm.transcriptionState.collectAsStateWithLifecycle()
+    val live by vm.liveState.collectAsStateWithLifecycle()
 
     LaunchedEffect(session.userId) { vm.onScreenEntered() }
     LaunchedEffect(vm.requiresSignIn) {
@@ -410,6 +412,10 @@ private fun MeetingWorkspaceScreen(
                         isPaused = recording.paused,
                         elapsedRecordingMs = elapsedRecordingMs,
                         recordingError = vm.recordingError,
+                        liveEnabled = vm.liveTranscript,
+                        onLiveChange = { vm.liveTranscript = it },
+                        liveLines = live.lines,
+                        liveStatus = live.status,
                         onRecord = { requestRecording() },
                         onPauseResume = { vm.pauseOrResumeRecording() },
                         onStopRecording = { vm.stopRecording() },
@@ -562,6 +568,37 @@ private fun OverviewContent(
     }
 }
 
+/** Provisional text that arrives while recording; the final transcript replaces it. */
+@Composable
+private fun LivePanel(lines: List<LiveLine>, status: String) {
+    Column(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(BlueTint).padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("LIVE TRANSCRIPT", color = Blue, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+            if (status.isNotBlank()) Text(status, color = Muted, style = MaterialTheme.typography.labelSmall)
+        }
+        if (lines.isEmpty()) {
+            Text(
+                "Text appears here about half a minute behind the conversation.",
+                color = Muted,
+                style = MaterialTheme.typography.bodySmall
+            )
+        }
+        lines.forEach { line ->
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    SpeakerTranscripts.formatTimestamp(line.startSeconds),
+                    color = Muted,
+                    style = MaterialTheme.typography.labelSmall
+                )
+                Text(line.text, color = Ink, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+            }
+        }
+    }
+}
+
 @Composable
 private fun TranscribeContent(
     selectedName: String,
@@ -572,6 +609,10 @@ private fun TranscribeContent(
     isPaused: Boolean,
     elapsedRecordingMs: Long,
     recordingError: String,
+    liveEnabled: Boolean,
+    onLiveChange: (Boolean) -> Unit,
+    liveLines: List<LiveLine>,
+    liveStatus: String,
     onRecord: () -> Unit,
     onPauseResume: () -> Unit,
     onStopRecording: () -> Unit,
@@ -640,6 +681,17 @@ private fun TranscribeContent(
                     }
                 }
             } else {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text("Live transcript (beta)", fontWeight = FontWeight.SemiBold)
+                        Text(
+                            "Sends 30-second pieces to your PC while you record. The full transcript still follows.",
+                            color = Muted,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                    Switch(checked = liveEnabled, onCheckedChange = onLiveChange)
+                }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(onClick = onRecord, modifier = Modifier.weight(1f)) {
                         androidx.compose.material3.Icon(Icons.Default.Mic, null)
@@ -653,6 +705,7 @@ private fun TranscribeContent(
                     }
                 }
             }
+            if (liveLines.isNotEmpty() || liveStatus.isNotBlank()) LivePanel(liveLines, liveStatus)
             if (recordingError.isNotBlank()) InfoMessage(recordingError, Color(0xFFFFEEEE), Color(0xFFB33C46))
         }
 

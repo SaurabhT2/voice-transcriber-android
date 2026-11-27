@@ -54,6 +54,14 @@ data class RecordingItem(
     val isLocalOnly: Boolean = false
 )
 
+/** Transcript of one finished live chunk. [failed] chunks carry no text. */
+data class LiveTextChunk(
+    val index: Int,
+    val startSeconds: Double,
+    val text: String,
+    val failed: Boolean
+)
+
 data class CloudJob(
     val jobId: String,
     val status: String,
@@ -467,6 +475,94 @@ class WorkspaceBackend(context: Context) {
         requestJson("GET", WorkspaceConfig.API_BASE_URL + "/api/v1/meetings/$meetingId/notes/jobs/$jobId", bearerToken = token)
     }
 
+    // ---- live transcription (see sql/001_live_transcription.sql in the agent bundle) -----------
+
+    /** Creates the server-side session that streamed chunks are attached to. */
+    suspend fun createLiveSession(language: String?): String {
+        val body = JSONObject().put("language", language ?: JSONObject.NULL)
+        val response = authed { token ->
+            requestText(
+                "POST", WorkspaceConfig.SUPABASE_URL + "/rest/v1/live_sessions",
+                publicHeaders + ("Prefer" to "return=representation"), token, body.toString()
+            )
+        }
+        return JSONArray(response).getJSONObject(0).getString("id")
+    }
+
+    /**
+     * Uploads one audio chunk and registers it for transcription. Safe to repeat after a failure:
+     * an already-uploaded file or already-registered chunk counts as success.
+     */
+    suspend fun uploadLiveChunk(
+        sessionId: String,
+        index: Int,
+        startSeconds: Double,
+        durationSeconds: Double,
+        audio: ByteArray
+    ) {
+        val userId = sessions.active()?.userId ?: throw SessionExpiredException()
+        val objectPath = "live/$userId/$sessionId/$index.aac"
+        authed { token ->
+            try {
+                send(
+                    "POST",
+                    WorkspaceConfig.SUPABASE_URL + "/storage/v1/object/" + WorkspaceConfig.AUDIO_BUCKET + "/" + objectPath,
+                    publicHeaders + ("x-upsert" to "false"), token, audio, "audio/aac"
+                )
+            } catch (error: HttpException) {
+                if (!isDuplicate(error)) throw error
+            }
+            val row = JSONObject()
+                .put("session_id", sessionId)
+                .put("chunk_index", index)
+                .put("audio_object_path", objectPath)
+                .put("start_seconds", startSeconds)
+                .put("duration_seconds", durationSeconds)
+            try {
+                requestText(
+                    "POST", WorkspaceConfig.SUPABASE_URL + "/rest/v1/live_chunks",
+                    publicHeaders + ("Prefer" to "resolution=ignore-duplicates,return=minimal"), token, row.toString()
+                )
+            } catch (error: HttpException) {
+                if (error.code != 409) throw error
+            }
+        }
+    }
+
+    /** Chunks after [afterIndex] that the worker has finished (or given up on), oldest first. */
+    suspend fun fetchLiveChunkResults(sessionId: String, afterIndex: Int): List<LiveTextChunk> {
+        val url = Uri.parse(WorkspaceConfig.SUPABASE_URL + "/rest/v1/live_chunks").buildUpon()
+            .appendQueryParameter("select", "chunk_index,start_seconds,text,status")
+            .appendQueryParameter("session_id", "eq.$sessionId")
+            .appendQueryParameter("chunk_index", "gt.$afterIndex")
+            .appendQueryParameter("status", "in.(succeeded,failed)")
+            .appendQueryParameter("order", "chunk_index.asc")
+            .build().toString()
+        val rows = JSONArray(authed { token -> requestText("GET", url, publicHeaders, token) })
+        return (0 until rows.length()).map { i ->
+            val row = rows.getJSONObject(i)
+            LiveTextChunk(
+                index = row.getInt("chunk_index"),
+                startSeconds = row.optDouble("start_seconds", 0.0),
+                text = row.optString("text").takeIf { !row.isNull("text") }.orEmpty().trim(),
+                failed = row.optString("status") == "failed"
+            )
+        }
+    }
+
+    suspend fun closeLiveSession(sessionId: String) {
+        val body = JSONObject().put("status", "closed").put("closed_at", java.time.Instant.now().toString())
+        authed { token ->
+            requestText(
+                "PATCH", WorkspaceConfig.SUPABASE_URL + "/rest/v1/live_sessions?id=eq.$sessionId",
+                publicHeaders + ("Prefer" to "return=minimal"), token, body.toString()
+            )
+        }
+    }
+
+    private fun isDuplicate(error: HttpException) =
+        error.code == 409 || error.message.orEmpty().contains("already exists", ignoreCase = true)
+
     private suspend fun uploadSignedFile(
         signedUrl: String,
         file: File,
@@ -556,6 +652,15 @@ class WorkspaceBackend(context: Context) {
         headers: Map<String, String> = emptyMap(),
         bearerToken: String? = null,
         body: String? = null
+    ): String = send(method, url, headers, bearerToken, body?.toByteArray(StandardCharsets.UTF_8), "application/json")
+
+    private fun send(
+        method: String,
+        url: String,
+        headers: Map<String, String>,
+        bearerToken: String?,
+        body: ByteArray?,
+        contentType: String
     ): String {
         val connection = (URL(url).openConnection() as HttpURLConnection).apply {
             requestMethod = method
@@ -566,12 +671,13 @@ class WorkspaceBackend(context: Context) {
             if (bearerToken != null) setRequestProperty("Authorization", "Bearer " + bearerToken)
             if (body != null) {
                 doOutput = true
-                setRequestProperty("Content-Type", "application/json")
+                setFixedLengthStreamingMode(body.size)
+                setRequestProperty("Content-Type", contentType)
             }
         }
         try {
             if (body != null) {
-                connection.outputStream.bufferedWriter(StandardCharsets.UTF_8).use { it.write(body) }
+                connection.outputStream.use { it.write(body) }
             }
             val status = connection.responseCode
             val response = (if (status in 200..299) connection.inputStream else connection.errorStream)

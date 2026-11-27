@@ -59,7 +59,9 @@ class RecordingService : Service() {
                         this, NOTIFICATION_ID, buildNotification(),
                         ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
                     )
-                    if (!RecordingController.start(applicationContext)) shutDown()
+                    val live = intent.getBooleanExtra(EXTRA_LIVE, false)
+                    val language = intent.getStringExtra(EXTRA_LANGUAGE)
+                    if (!RecordingController.start(applicationContext, live, language)) shutDown()
                 } catch (error: Exception) {
                     RecordingController.reportError(error.message ?: "Unable to start the recording service.")
                     shutDown()
@@ -103,11 +105,17 @@ class RecordingService : Service() {
     companion object {
         const val ACTION_START = "com.saurabhtiwari.voicetranscriber.action.START_RECORDING"
         const val ACTION_STOP = "com.saurabhtiwari.voicetranscriber.action.STOP_RECORDING"
+        const val EXTRA_LIVE = "live"
+        const val EXTRA_LANGUAGE = "language"
         private const val NOTIFICATION_ID = 4101
 
-        fun start(context: Context) {
+        fun start(context: Context, live: Boolean = false, language: String? = null) {
             ContextCompat.startForegroundService(
-                context, Intent(context, RecordingService::class.java).setAction(ACTION_START)
+                context,
+                Intent(context, RecordingService::class.java)
+                    .setAction(ACTION_START)
+                    .putExtra(EXTRA_LIVE, live)
+                    .putExtra(EXTRA_LANGUAGE, language)
             )
         }
 

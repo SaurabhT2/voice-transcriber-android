@@ -13,16 +13,25 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
 
+/** Anything that can capture a meeting to a file; the controller does not care how. */
+interface MeetingRecorder {
+    fun start(): File
+    fun pause()
+    fun resume()
+    /** Finalises the file; null if it is too short to be valid. */
+    fun stop(): File?
+}
+
 /**
  * Records mono AAC at 16 kHz, the rate Whisper consumes, so on-device transcription needs no
  * resampling and files and uploads stay small (about 0.5 MB per minute).
  */
-class MeetingAudioRecorder(context: Context) {
+class MeetingAudioRecorder(context: Context) : MeetingRecorder {
     private val appContext = context.applicationContext
     private var recorder: MediaRecorder? = null
     private var outputFile: File? = null
 
-    fun start(): File {
+    override fun start(): File {
         check(recorder == null) { "Recording is already active." }
         val directory = File(appContext.filesDir, "recordings").apply { mkdirs() }
         val target = File(directory, "meeting_" + System.currentTimeMillis() + ".m4a")
@@ -53,16 +62,16 @@ class MeetingAudioRecorder(context: Context) {
         }
     }
 
-    fun pause() {
+    override fun pause() {
         recorder?.pause()
     }
 
-    fun resume() {
+    override fun resume() {
         recorder?.resume()
     }
 
     /** Finalises the file. Returns null (and removes it) if it is too short to be valid. */
-    fun stop(): File? {
+    override fun stop(): File? {
         val active = recorder ?: return null
         recorder = null
         val target = outputFile
@@ -95,18 +104,25 @@ object RecordingController {
     val state: StateFlow<RecordingState> = _state.asStateFlow()
 
     private val lock = Any()
-    private var recorder: MeetingAudioRecorder? = null
+    private var recorder: MeetingRecorder? = null
+    private var streamer: LiveStreamer? = null
 
-    fun start(context: Context): Boolean {
+    private class Started(val recorder: MeetingRecorder, val file: File, val streamer: LiveStreamer?)
+
+    /**
+     * @param live also stream ~30 s chunks to the worker for live text. Live text is optional, so
+     * if the live capture pipeline cannot start on this device the plain recorder is used instead.
+     */
+    fun start(context: Context, live: Boolean = false, language: String? = null): Boolean {
         synchronized(lock) {
             if (recorder != null) return true
-            val instance = MeetingAudioRecorder(context)
             return try {
-                val file = instance.start()
-                recorder = instance
+                val started = open(context, live, language)
+                recorder = started.recorder
+                streamer = started.streamer
                 _state.value = RecordingState(
                     active = true,
-                    file = file,
+                    file = started.file,
                     resumedAtMs = SystemClock.elapsedRealtime()
                 )
                 true
@@ -117,6 +133,21 @@ object RecordingController {
                 false
             }
         }
+    }
+
+    private fun open(context: Context, live: Boolean, language: String?): Started {
+        if (live) {
+            val streamer = WorkspaceServices.from(context).live
+            try {
+                streamer.begin(language)
+                val capture = LiveCaptureRecorder(context) { streamer.onChunk(it) }
+                return Started(capture, capture.start(), streamer)
+            } catch (error: Exception) {
+                streamer.cancel()
+            }
+        }
+        val plain = MeetingAudioRecorder(context)
+        return Started(plain, plain.start(), null)
     }
 
     fun pause() {
@@ -152,6 +183,8 @@ object RecordingController {
             val active = recorder ?: return null
             recorder = null
             val file = active.stop()
+            streamer?.end()
+            streamer = null
             _state.value = if (file == null) {
                 RecordingState(error = "The recording was too short or could not be finalized. Please record again.")
             } else {
