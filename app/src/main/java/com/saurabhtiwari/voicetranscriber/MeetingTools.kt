@@ -421,13 +421,27 @@ internal fun MeetingActionBar(
     val context = LocalContext.current
     var dialog by remember { mutableStateOf<ToolDialog?>(null) }
     var pendingSave by remember { mutableStateOf<String?>(null) }
+    var pendingPdf by remember { mutableStateOf<ExportDocument?>(null) }
     val saveSaved: (Uri?) -> Unit = { uri ->
         val text = pendingSave
         pendingSave = null
         if (uri != null && text != null) writeExport(context, uri, text)
     }
+    val pdfSaved: (Uri?) -> Unit = { uri ->
+        val document = pendingPdf
+        pendingPdf = null
+        if (uri != null && document != null) {
+            try {
+                TranscriptPdfExport.write(context, uri, document)
+                toast(context, "PDF saved")
+            } catch (_: Exception) {
+                toast(context, "Could not create the PDF.")
+            }
+        }
+    }
     val markdownSaver = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/markdown"), saveSaved)
     val jsonSaver = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json"), saveSaved)
+    val pdfSaver = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/pdf"), pdfSaved)
     var menuOpen by remember { mutableStateOf(false) }
 
     // Closes the menu, then runs [block] with the open recording's export document (nothing if it vanished).
@@ -467,6 +481,15 @@ internal fun MeetingActionBar(
                         export {
                             pendingSave = TranscriptExport.json(it)
                             jsonSaver.launch(TranscriptExport.fileName(it.title, "json"))
+                        }
+                    }
+                )
+                DropdownMenuItem(
+                    text = { Text("Save PDF file") },
+                    onClick = {
+                        export {
+                            pendingPdf = it
+                            pdfSaver.launch(TranscriptExport.fileName(it.title, "pdf"))
                         }
                     }
                 )
