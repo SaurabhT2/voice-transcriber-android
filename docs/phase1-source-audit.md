@@ -68,10 +68,10 @@ This audit examines the Android repository only. It does not certify the FastAPI
 - P1-07/P1-08: multilingual and diarisation quality validation.
 - P1-09–P1-15: validate actual notes-generation schema and extraction quality.
 - P1-27: explicit cloud-processing disclosure/consent policy.
-- P1-28/P1-29: RLS, encryption, retention and chunk cleanup.
+- P1-28/P1-29: RLS policies exist on meetings, transcripts, artifacts, notes jobs, transcription jobs, live sessions and live chunks, with owner_id = auth.uid() predicates on the inspected policies; still validate encryption, storage policies, retention and chunk cleanup.
 - P1-30: end-to-end recording integrity and idempotency tests.
 
-## Validation status
+## Additional live Supabase schema inspection\n\nThe connected project schema was inspected read-only. The listed application tables have RLS enabled. Owner-management policies were found on meetings, transcripts, meeting_artifacts and transcription_jobs; live-session/chunk policies also constrain authenticated ownership. Foreign keys from transcripts, meeting_artifacts and meeting_notes_jobs to meetings use ON DELETE CASCADE. The transcription_jobs table has no foreign key from meeting_id to meetings, and its audio_object_path points to Storage; therefore a client-side DELETE of a meeting alone would not prove complete deletion. Storage object cleanup and job cleanup need an explicit backend workflow. This inspection confirms policy presence and predicates, not adversarial tenant-isolation test results.\n\n## Validation status
 
 The GitHub source was inspected and the changes were committed to the new branch. This environment does not provide the repository's Android SDK/NDK/Gradle build runtime or a connected Android device, so **no claim is made that Gradle tests, lint, APK assembly, or device acceptance have passed**. Run the repository CI workflow and real-device checks before merging.
 
