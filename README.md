@@ -104,7 +104,7 @@ Rename, delete and server-side search rely on row-level-security policies in the
 ## Privacy and execution choices
 
 - Local mode does not upload audio. The app syncs transcript text and meeting metadata only.
-- Shared GPU mode requires an explicit user action before audio upload.
+- Shared GPU mode requires a per-upload confirmation explaining that original audio leaves the phone, is stored in the private workspace and is processed by the configured GPU worker.
 - Audio uploads use a short-lived signed URL to the private `meeting-audio` bucket.
 - Supabase publishable keys are client-safe and are paired with owner-scoped RLS and the user's access token.
 - Service-role keys, worker credentials, and inference secrets never ship in the Android app.
