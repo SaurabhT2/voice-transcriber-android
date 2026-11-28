@@ -952,6 +952,23 @@ private fun HistoryContent(
                         ) { Text("Rename") }
                         OutlinedButton(
                             onClick = {
+                                val payload = JSONObject()
+                                    .put("meeting_id", currentMeeting.meetingId)
+                                    .put("title", currentMeeting.title)
+                                    .put("transcript", currentMeeting.transcript)
+                                    .put("notes", meetingNotes ?: JSONObject.NULL)
+                                    .put("created_at", currentMeeting.createdAt)
+                                val send = Intent(Intent.ACTION_SEND).apply {
+                                    type = "application/json"
+                                    putExtra(Intent.EXTRA_SUBJECT, currentMeeting.title + " — Meeting Intelligence")
+                                    putExtra(Intent.EXTRA_TEXT, payload.toString(2))
+                                }
+                                context.startActivity(Intent.createChooser(send, "Export meeting JSON"))
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) { Text("JSON") }
+                        OutlinedButton(
+                            onClick = {
                                 val text = buildString {
                                 appendLine("# ${currentMeeting.title}")
                                 appendLine()
