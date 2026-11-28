@@ -50,7 +50,8 @@ data class LiveTextChunk(
     val failed: Boolean
 )
 
-private const val MAX_TITLE_LENGTH = 200
+/** Matches the database's 500-character limit on meeting titles. */
+private const val MAX_TITLE_LENGTH = 500
 
 /** Asks PostgREST to return the affected rows, so "nothing changed" (blocked by RLS) is detectable. */
 private val RETURN_ROWS = mapOf("Prefer" to "return=representation")

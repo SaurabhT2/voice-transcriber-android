@@ -3,9 +3,10 @@
 The Android app talks to the shared Supabase project with the signed-in user's access token, so every
 statement below is subject to **row-level security (RLS)**. Nothing here needs a service-role key.
 
-> The schema and policies live in [whisper-platform-api](https://github.com/SaurabhT2/whisper-platform-api),
-> which was **not reviewed** when this was written. The SQL is a starting point to compare against what
-> already exists, not a verified migration.
+> **Verified on 28 November 2026** against the "Whisper" Supabase project (read-only): every policy and
+> constraint these features rely on already exists. Nothing needs to be added for Phase 2 to work. Details are in
+> [phase1-source-audit.md](phase1-source-audit.md#live-supabase-verification). The API repository
+> ([whisper-platform-api](https://github.com/SaurabhT2/whisper-platform-api)) was not reviewed.
 
 ## What the app calls
 
@@ -22,24 +23,14 @@ policy surfaces as a clear message ("could not be renamed / deleted") instead of
 Search is the exception: a refused request just yields no server matches, and title plus on-device matching
 still works.
 
-## Example policies (verify against the existing schema first)
+## What the database already provides
 
-```sql
-create policy meetings_update_own on public.meetings
-  for update using (owner_id = auth.uid()) with check (owner_id = auth.uid());
-
-create policy meetings_delete_own on public.meetings
-  for delete using (owner_id = auth.uid());
-
-create policy transcription_jobs_delete_own on public.transcription_jobs
-  for delete using (owner_id = auth.uid());
-
-create policy transcripts_select_own on public.transcripts
-  for select using (owner_id = auth.uid());
-```
-
-Foreign keys from `transcripts`, notes and notes jobs to `meetings` should be `on delete cascade`;
-otherwise a meeting delete fails with a foreign-key error, which the app reports to the user.
+- `meetings`, `transcripts` and `transcription_jobs` each have an owner-only `ALL` policy (`auth.uid() = owner_id`),
+  which covers the rename `PATCH`, both `DELETE`s and the transcript search `SELECT`.
+- `transcripts`, `meeting_artifacts` and `meeting_notes_jobs` cascade when their meeting is deleted.
+- `transcription_jobs` has **no** foreign key to `meetings`. That is why the app deletes the meeting's job rows
+  first; otherwise they would stay in the history pointing at a meeting that no longer exists.
+- `meetings.title` is limited to 500 characters (the app enforces the same limit); `cancelled` is a valid job status.
 
 Optional, for fast search on large histories:
 

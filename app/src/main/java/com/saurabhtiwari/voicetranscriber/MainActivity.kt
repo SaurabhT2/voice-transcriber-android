@@ -1013,7 +1013,7 @@ private fun HistoryContent(
                         isLocalOnly = true
                     )
                     PlayerBar(tools.player, tools.onTogglePlay, tools.onSeekMs)
-                    Text(currentLocalRecord.transcript, color = Ink, style = MaterialTheme.typography.bodyMedium)
+                    PlainTranscriptView(currentLocalRecord.transcript, currentLocalRecord.eventId)
                     InfoMessage("This transcript has not synced to your online workspace yet. It will retry when connectivity is available.", AmberTint, Amber)
                 }
             }
@@ -1128,22 +1128,25 @@ private fun NotesContent(notes: JSONObject, onSeek: ((Double) -> Unit)?) {
     val groups = listOf(
         "Key points" to notes.optJSONArray("key_points"),
         "Decisions" to notes.optJSONArray("decisions"),
-        "Action items" to notes.optJSONArray("action_items")
+        "Action items" to notes.optJSONArray("action_items"),
+        "Open questions" to notes.optJSONArray("open_questions"),
+        "Risks and blockers" to NoteItems.risks(notes),
+        "Next steps" to notes.optJSONArray("next_steps")
     )
     groups.forEach { (title, values) ->
         if (values != null && values.length() > 0) {
             Text(title, fontWeight = FontWeight.SemiBold)
             for (index in 0 until minOf(values.length(), 8)) {
-                val item = values.optJSONObject(index) ?: continue
-                val text = item.optString("text").ifBlank { item.optString("task") }
+                val item = NoteItems.at(values, index) ?: continue
+                val text = NoteItems.text(item)
                 if (text.isNotBlank()) {
-                    val start = item.optDouble("start_seconds", Double.NaN)
-                    val stamp = if (start.isNaN()) "" else "[" + SpeakerTranscripts.formatTimestamp(start) + "] "
+                    val start = NoteItems.startSeconds(item)
+                    val stamp = if (start == null) "" else "[" + SpeakerTranscripts.formatTimestamp(start) + "] "
                     Text(
                         "• " + stamp + text,
                         color = Muted,
                         style = MaterialTheme.typography.bodySmall,
-                        modifier = if (onSeek != null && !start.isNaN()) Modifier.clickable { onSeek(start) } else Modifier
+                        modifier = if (onSeek != null && start != null) Modifier.clickable { onSeek(start) } else Modifier
                     )
                 }
             }

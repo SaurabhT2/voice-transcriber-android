@@ -102,4 +102,63 @@ class TranscriptExportTest {
         assertTrue(TranscriptExport.fileName("a".repeat(200), "md").length <= 83)
         assertFalse(TranscriptExport.fileName("../../etc/passwd", "md").contains("/"))
     }
+
+    @Test
+    fun jsonKeepsTheEarlierKeysAndAddsSpeakerTurns() {
+        val doc = TranscriptExport.documentFor(meeting(), mapOf("speaker_1" to "Asha"), notes)
+        val parsed = JSONObject(TranscriptExport.json(doc))
+        // keys of the earlier plain JSON export
+        assertEquals("m1", parsed.getString("meeting_id"))
+        assertEquals("Weekly sync", parsed.getString("title"))
+        assertEquals("plain text", parsed.getString("transcript"))
+        assertEquals("2026-11-28T09:30:00Z", parsed.getString("created_at"))
+        assertEquals("The team agreed to ship on Friday.", parsed.getJSONObject("notes").getString("executive_summary"))
+        // additions
+        assertEquals(1, parsed.getInt("schema_version"))
+        val turns = parsed.getJSONArray("turns")
+        assertEquals(3, turns.length())
+        assertEquals("Asha", turns.getJSONObject(0).getString("speaker"))
+        assertEquals("speaker_1", turns.getJSONObject(0).getString("speaker_id"))
+        assertEquals(5.0, turns.getJSONObject(1).getDouble("start_seconds"), 0.0001)
+        assertEquals("Speaker 2", turns.getJSONObject(1).getString("speaker"))
+        assertEquals(listOf("Asha", "Speaker 2"), (0 until 2).map { parsed.getJSONArray("speakers").getJSONObject(it).getString("label") })
+    }
+
+    @Test
+    fun jsonWithoutNotesOrSegmentsIsStillValid() {
+        val parsed = JSONObject(TranscriptExport.json(TranscriptExport.documentFor(meeting(JSONArray(), JSONArray(), "Just text."), emptyMap(), null)))
+        assertTrue(parsed.isNull("notes"))
+        assertEquals(0, parsed.getJSONArray("turns").length())
+        assertEquals("Just text.", parsed.getString("transcript"))
+        val local = JSONObject(TranscriptExport.json(TranscriptExport.documentFor(
+            LocalMeetingRecord("e1", "u1", "Voice note", "Remember the milk.", "2026-11-27T08:00:00Z", "", "", "en", null)
+        )))
+        assertEquals("e1", local.getString("meeting_id"))
+    }
+
+    @Test
+    fun risksAndNextStepsAreExportedEvenWithLegacyKeyAndPlainStringItems() {
+        val extra = JSONObject()
+            .put("executive_summary", "S")
+            .put("risks", JSONArray().put("Vendor may slip").put("  ").put(JSONObject.NULL))        // legacy key, strings, junk
+            .put("next_steps", JSONArray().put(JSONObject().put("text", "Book review").put("start_seconds", 30.0)))
+        val md = TranscriptExport.markdown(TranscriptExport.documentFor(meeting(), emptyMap(), extra))
+        assertTrue(md.contains("## Risks and blockers\n\n- Vendor may slip\n\n"))
+        assertTrue(md.contains("## Next steps\n\n- [0:30] Book review"))
+        val modern = JSONObject().put("risks_and_blockers", JSONArray().put(JSONObject().put("text", "New key")))
+            .put("risks", JSONArray().put("Old key"))
+        assertTrue(TranscriptExport.markdown(TranscriptExport.documentFor(meeting(), emptyMap(), modern)).contains("- New key"))
+    }
+
+    @Test
+    fun noteItemParsingToleratesObjectsStringsAndGarbage() {
+        val values = JSONArray().put(JSONObject().put("task", "Do it")).put("plain").put("  ").put(JSONObject.NULL).put(5)
+        assertEquals("Do it", NoteItems.text(NoteItems.at(values, 0)!!))
+        assertEquals("plain", NoteItems.text(NoteItems.at(values, 1)!!))
+        assertTrue(NoteItems.at(values, 2) == null)
+        assertTrue(NoteItems.at(values, 3) == null)
+        assertEquals("5", NoteItems.text(NoteItems.at(values, 4)!!))
+        assertTrue(NoteItems.startSeconds(JSONObject().put("start_seconds", JSONObject.NULL)) == null)
+        assertEquals(12.5, NoteItems.startSeconds(JSONObject().put("start_seconds", 12.5))!!, 0.0)
+    }
 }

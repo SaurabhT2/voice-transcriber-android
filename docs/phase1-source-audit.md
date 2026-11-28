@@ -29,38 +29,44 @@ This audit examines the Android repository only. It does not certify the FastAPI
 | P1-13 | Open questions | Not rendered by original `NotesContent` | Implemented in this branch: render `open_questions` |
 | P1-14 | Risks and blockers | Not rendered by original `NotesContent` | Implemented in this branch: render `risks_and_blockers`, with `risks` fallback; extraction still depends on notes service |
 | P1-15 | Next steps | Not rendered by original `NotesContent` | Implemented in this branch: render `next_steps` |
-| P1-16 | Timestamp-linked notes and transcript references | No note-to-segment/audio reference interaction found in Android UI | Pending |
-| P1-17 | Full audio playback | No playback control in the opened meeting detail UI; picker/import is not playback | Pending |
-| P1-18 | Tap transcript timestamp to seek audio | Timestamps are rendered by `SpeakerTranscript.formatTimestamp`, but no audio seek action is wired | Pending |
-| P1-19 | Highlight active transcript segment during playback | No playback position state or active-turn highlighting found | Pending |
-| P1-20 | Search within current transcript | No search control in original `TranscriptBody` | Implemented in this branch: case-insensitive search over transcript sentences/attributed turns |
-| P1-21 | Rename/delete meeting and associated data | No rename/delete action in `HistoryContent` or `MeetingViewModel`; no corresponding method in `WorkspaceBackend` | Pending; deletion must be designed against actual FK/storage cascade and RLS behaviour |
-| P1-22 | Basic sharing of meeting notes | No share action in original detail view | Implemented in this branch: Android Sharesheet shares transcript and available notes |
-| P1-23 | Export transcript and notes | No export action in original detail view | Partially implemented: Sharesheet export handoff in Markdown-compatible text and structured JSON payload; no durable file writer yet |
-| P1-24 | Markdown/PDF and structured JSON export | No format-specific export pipeline found | Partially implemented: Markdown-compatible and structured JSON Sharesheet payloads; standalone PDF export and durable file export pending |
+| P1-16 | Timestamp-linked notes and transcript references | `NoteItems`, `NotesContent`, `MeetingTools.kt` | Implemented: notes with `start_seconds` show `[m:ss]` and, when the audio is on this phone, jump to that moment. Notes only carry timestamps if the notes service provides them; device validation pending |
+| P1-17 | Full audio playback | `AudioPlayerController.kt` (platform `MediaPlayer`), `AudioLinks.kt`, `MeetingTools.kt:PlayerBar` | Implemented for recordings stored on this phone. Imported audio and recordings from other devices have no local file; remote playback would need signed URLs from the API. Device validation pending |
+| P1-18 | Tap transcript timestamp to seek audio | `TimedTranscript`, `Playback.seekTargetMs` | Implemented: tapping a line starts playback 1.5 s before it (also works for transcripts without speaker labels, one line per segment). Device validation pending |
+| P1-19 | Highlight active transcript segment during playback | `Playback.activeIndex`, `TimedTranscript` | Implemented. Device validation pending |
+| P1-20 | Search within current transcript | `TranscriptFind.kt`, `FindBar`, `HistorySearch.kt` | Implemented: find in the open transcript with highlighted matches, a match count and "Show only matches"; plus library search across titles, on-device transcript text and workspace transcripts (owner-scoped `ilike` query) |
+| P1-21 | Rename/delete meeting and associated data | `WorkspaceBackend.renameMeeting/deleteMeeting/deleteJob`, `LocalMeetingStore`, `MeetingViewModel` | Rename implemented for synced and on-device transcripts; a refused update is reported instead of shown as success. Delete implemented: job rows are removed first (no foreign key links `transcription_jobs.meeting_id` to `meetings`), then the meeting, which cascades to transcripts, artifacts and notes jobs. Failed or cancelled jobs can be removed on their own. Storage audio objects are **not** deleted; that needs an API endpoint |
+| P1-22 | Basic sharing of meeting notes | `MeetingActionBar`, `TranscriptExport.kt` | Implemented: share as plain text with speaker names, timestamps and any loaded notes; very long transcripts are saved as files instead of risking an oversized share intent |
+| P1-23 | Export transcript and notes | `MeetingActionBar` (system file picker) | Implemented: save Markdown or JSON to a user-selected file, or copy as Markdown |
+| P1-24 | Markdown/PDF and structured JSON export | `TranscriptExport.markdown/json/plainText` | Markdown and structured JSON implemented (JSON keeps the earlier `meeting_id`, `title`, `transcript`, `notes`, `created_at` keys and adds `speakers` and timed `turns`); standalone PDF export pending |
 | P1-25 | Local-only processing mode | `LocalTranscriber.kt`, `ViewModels.kt`, UI copy in `MainActivity.kt`; README says audio stays on device | Implemented; verify no audio network call in local mode |
 | P1-26 | Optional shared-GPU processing | UI offers Local/Shared GPU mode; explicit upload button; `startSharedGpuTranscription` | Implemented explicit user-initiated path; verify consent copy and backend behaviour |
 | P1-27 | Optional cloud processing with clear consent | Shared GPU is opt-in through explicit mode selection and upload action; no separate cloud provider path | Partial: explicit upload action exists; a dedicated cloud-processing consent/data-flow UX is not established |
-| P1-28 | Authentication, user isolation, encryption and RLS | `SessionManager` uses Keystore; `WorkspaceBackend.loadRecordings` filters by authenticated owner; README describes owner-scoped RLS | Android auth/session and owner filters implemented; database RLS, encryption at rest/in transit and cross-tenant tests require backend audit |
-| P1-29 | Retention and temporary live-chunk cleanup | No retention policy or server-side temporary chunk cleanup implementation found in this Android repository | Pending external/backend verification |
+| P1-28 | Authentication, user isolation, encryption and RLS | `SessionManager` uses Keystore; `WorkspaceBackend.loadRecordings` filters by authenticated owner; README describes owner-scoped RLS | Android auth/session and owner filters implemented; database RLS, encryption at rest/in transit and cross-tenant tests require backend audit Row-level security was checked against the live project on 28 Nov 2026 (see "Live Supabase verification"). |
+| P1-29 | Retention and temporary live-chunk cleanup | RLS inspection (below): clients may only INSERT and SELECT `live_chunks` | Pending: with no UPDATE/DELETE policy for clients, temporary chunk cleanup and retention must run server-side. Not implemented in this repository |
 | P1-30 | Recording integrity checks and idempotent sync | `AtomicFiles.kt`, `LocalMeetingStore.kt`, `SyncWork.kt`; stable `client_event_id` in `WorkspaceBackend.syncOfflineTranscript` | Atomic transcript persistence and idempotent sync mechanism implemented; media integrity and duplicate/recovery tests still required |
 
 ## Changes made on this branch
 
-1. Added transcript search to `TranscriptBody`: case-insensitive filtering for plain transcript sentences and speaker-attributed turns, plus a no-match state.
-2. Expanded `NotesContent` to render open questions, risks/blockers and next steps in addition to summary, key points, decisions and action items.
-3. Added Share / export and JSON export actions on the opened meeting detail. Markdown-compatible text includes transcript and any currently loaded notes; JSON includes meeting ID, title, transcript, notes and creation timestamp.
+Phase 1 foundation work (earlier commits):
+
+1. Transcript search in `TranscriptBody`, expanded `NotesContent` (open questions, risks and blockers, next steps) and Share / JSON export actions.
+
+Phase 2 library tools, stacked on top (this integration):
+
+2. **Playback:** `AudioPlayerController` (platform `MediaPlayer`), transcript-to-audio links (`AudioLinkStore`), tap a transcript line or timestamped note to seek, active line highlighted.
+3. **Find and search:** in-transcript find now highlights matches and can show only matching lines (it replaces the earlier filter-only view); library search covers titles, on-device transcript text and workspace transcripts.
+4. **Export:** one menu with share as text, copy as Markdown, save Markdown file, share as JSON and save JSON file. Exports include speaker names, timestamps and every notes section. The earlier JSON keys are kept.
+5. **Rename, delete, edit:** rename (synced and on-device), delete with job and local cleanup, remove failed jobs, edit unsynced on-device text, device-local speaker names. This replaces the earlier rename, which could not detect a refused update.
+6. **Cancel** for shared-GPU uploads and queued or running jobs.
+7. Notes sections accept both object and plain-string entries, and the legacy `risks` key.
 
 ## Remaining Phase 1 work
 
 ### Android implementation still required
-- P1-16: note-to-transcript/audio timestamp references.
-- P1-17: audio player in meeting detail.
-- P1-18: timestamp-to-audio seek.
-- P1-19: active transcript segment synchronisation/highlighting.
-- P1-21: rename is implemented with owner_id filtering and RLS; delete remains blocked on coordinated transcription-job and Storage-object cleanup.
-- P1-23: durable export to a user-selected file.
-- P1-24: standalone PDF exporter and durable file output (Markdown and JSON can currently be shared through the Android Sharesheet).
+- Device validation of everything marked "Implemented" above; the Phase 2 work was syntax-checked and its pure logic unit-tested, but not built or run on a device.
+- P1-21: delete of the audio object in Storage (needs an API endpoint, together with live-chunk cleanup).
+- P1-24: standalone PDF exporter.
+- Editing server-side transcripts and persisting speaker names server-side (both need endpoints).
 
 ### Backend/security acceptance required
 - P1-03: offline audio upload recovery (not just transcript sync).
@@ -68,10 +74,22 @@ This audit examines the Android repository only. It does not certify the FastAPI
 - P1-07/P1-08: multilingual and diarisation quality validation.
 - P1-09–P1-15: validate actual notes-generation schema and extraction quality.
 - P1-27: explicit cloud-processing disclosure/consent policy.
-- P1-28/P1-29: RLS policies exist on meetings, transcripts, artifacts, notes jobs, transcription jobs, live sessions and live chunks, with owner_id = auth.uid() predicates on the inspected policies; still validate encryption, storage policies, retention and chunk cleanup.
+- P1-28/P1-29: RLS is verified (see "Live Supabase verification"); still validate encryption, Storage bucket policies, retention and chunk cleanup, and add cross-tenant tests.
 - P1-30: end-to-end recording integrity and idempotency tests.
 
-## Additional live Supabase schema inspection\n\nThe connected project schema was inspected read-only. The listed application tables have RLS enabled. Owner-management policies were found on meetings, transcripts, meeting_artifacts and transcription_jobs; live-session/chunk policies also constrain authenticated ownership. Foreign keys from transcripts, meeting_artifacts and meeting_notes_jobs to meetings use ON DELETE CASCADE. The transcription_jobs table has no foreign key from meeting_id to meetings, and its audio_object_path points to Storage; therefore a client-side DELETE of a meeting alone would not prove complete deletion. Storage object cleanup and job cleanup need an explicit backend workflow. This inspection confirms policy presence and predicates, not adversarial tenant-isolation test results.\n\n## Validation status
+## Live Supabase verification
+
+Checked read-only on 28 November 2026 against the project this app connects to ("Whisper"), by querying `pg_policies`, `pg_class` and `pg_constraint`:
+
+- Row-level security is **enabled on all 8 application tables**.
+- `meetings`, `transcripts`, `transcription_jobs`, `meeting_artifacts` and `device_sync_events` each have one `ALL` policy limited to the owner (`auth.uid() = owner_id`, for both `USING` and `WITH CHECK`).
+- `live_sessions`: owners may INSERT (status `recording`), SELECT, and UPDATE only from `recording` to `closed`.
+- `live_chunks`: owners may INSERT (a tightly constrained row, including the exact `live/<user>/<session>/<index>.aac` object path) and SELECT. There is **no** UPDATE or DELETE policy for clients.
+- `meeting_notes_jobs`: RLS is enabled with **no policies**, so clients cannot read or write it; only the API and workers (service role) can. (An earlier version of this audit said policies existed for notes jobs; that was not accurate.)
+- Foreign keys: `transcripts`, `meeting_artifacts` and `meeting_notes_jobs` reference `meetings` with `ON DELETE CASCADE`. `transcription_jobs` has **no** foreign key to `meetings`, so deleting a meeting leaves its job rows behind unless they are deleted separately.
+- `meetings.title` is limited to 500 characters; `transcription_jobs.status` allows `cancelled`.
+
+Not verified: Storage bucket policies, encryption settings, and behaviour of the API (not part of this repository).
 
 The GitHub source was inspected and the changes were committed to the new branch. This environment does not provide the repository's Android SDK/NDK/Gradle build runtime or a connected Android device, so **no claim is made that Gradle tests, lint, APK assembly, or device acceptance have passed**. Run the repository CI workflow and real-device checks before merging.
 

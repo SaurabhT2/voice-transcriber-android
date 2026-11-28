@@ -22,18 +22,18 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.EditNote
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -52,6 +52,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 
@@ -82,6 +87,9 @@ internal class HistoryTools(
 )
 
 private val DangerRed = Color(0xFFB33C46)
+
+/** The database limits meeting titles to 500 characters. */
+private const val MAX_TITLE_CHARS = 500
 
 // ---- search ------------------------------------------------------------------------------------
 
@@ -159,8 +167,11 @@ internal fun TimedTranscript(
     activeIndex: Int,
     canSeek: Boolean,
     onPlayFrom: (Double) -> Unit,
-    onSpeakerClick: (SpeakerStat) -> Unit
+    onSpeakerClick: (SpeakerStat) -> Unit,
+    query: String = "",
+    matchesOnly: Boolean = false
 ) {
+    val filtering = matchesOnly && query.isNotBlank()
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         if (transcript.hasSpeakers) {
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -186,6 +197,7 @@ internal fun TimedTranscript(
             }
         }
         transcript.turns.forEachIndexed { index, turn ->
+            if (filtering && !TranscriptFind.contains(turn.text, query)) return@forEachIndexed
             val rowModifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(8.dp))
@@ -208,9 +220,91 @@ internal fun TimedTranscript(
                         style = MaterialTheme.typography.labelSmall
                     )
                 }
-                Text(turn.text, color = Ink, style = MaterialTheme.typography.bodyMedium)
+                HighlightedText(turn.text, query, Ink, MaterialTheme.typography.bodyMedium)
             }
         }
+    }
+}
+
+/** [text] with every match of [query] highlighted; plain text when the query is blank. */
+@Composable
+internal fun HighlightedText(text: String, query: String, color: Color, style: TextStyle, modifier: Modifier = Modifier) {
+    val annotated = remember(text, query) { highlight(text, query) }
+    Text(annotated, color = color, style = style, modifier = modifier)
+}
+
+private fun highlight(text: String, query: String): AnnotatedString = buildAnnotatedString {
+    var cursor = 0
+    for (range in TranscriptFind.ranges(text, query)) {
+        append(text.substring(cursor, range.first))
+        withStyle(SpanStyle(background = AmberTint, color = Ink, fontWeight = FontWeight.SemiBold)) {
+            append(text.substring(range.first, range.last + 1))
+        }
+        cursor = range.last + 1
+    }
+    append(text.substring(cursor))
+}
+
+/** Find box with a match count and a switch between highlighting matches and showing only them. */
+@Composable
+internal fun FindBar(
+    query: String,
+    onQueryChange: (String) -> Unit,
+    matchCount: Int,
+    matchesOnly: Boolean,
+    onToggleMatchesOnly: () -> Unit
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        OutlinedTextField(
+            value = query,
+            onValueChange = onQueryChange,
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true,
+            label = { Text("Find in this transcript") },
+            leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+            trailingIcon = {
+                if (query.isNotEmpty()) {
+                    IconButton(onClick = { onQueryChange("") }) {
+                        Icon(Icons.Default.Clear, contentDescription = "Clear find")
+                    }
+                }
+            }
+        )
+        if (query.isNotBlank()) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+                Text(
+                    when (matchCount) {
+                        0 -> "No matches"
+                        1 -> "1 match"
+                        else -> "$matchCount matches"
+                    },
+                    color = Muted,
+                    style = MaterialTheme.typography.labelSmall
+                )
+                if (matchCount > 0) {
+                    TextButton(onClick = onToggleMatchesOnly) {
+                        Text(if (matchesOnly) "Show full transcript" else "Show only matches")
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** A transcript without timestamps (an on-device transcript): find, highlight and filter by sentence. */
+@Composable
+internal fun PlainTranscriptView(text: String, resetKey: Any) {
+    var query by remember(resetKey) { mutableStateOf("") }
+    var matchesOnly by remember(resetKey) { mutableStateOf(false) }
+    val matchCount = remember(text, query) { TranscriptFind.ranges(text, query).size }
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        FindBar(query, { query = it }, matchCount, matchesOnly) { matchesOnly = !matchesOnly }
+        val shown = if (matchesOnly && query.isNotBlank()) {
+            TranscriptFind.matchingSentences(text, query).joinToString("\n\n")
+        } else {
+            text
+        }
+        HighlightedText(shown, query, Ink, MaterialTheme.typography.bodyMedium)
     }
 }
 
@@ -221,9 +315,13 @@ internal fun MeetingTranscriptView(meeting: MeetingDetail, tools: HistoryTools) 
         DisplayTranscripts.build(meeting.segments, meeting.speakers, tools.speakerAliases)
     }
     if (display.isEmpty) {
-        Text(meeting.transcript.ifBlank { "Transcript unavailable." }, color = Ink, style = MaterialTheme.typography.bodyMedium)
+        PlainTranscriptView(meeting.transcript.ifBlank { "Transcript unavailable." }, meeting.meetingId)
         return
     }
+    var query by remember(meeting.meetingId) { mutableStateOf("") }
+    var matchesOnly by remember(meeting.meetingId) { mutableStateOf(false) }
+    val matchCount = remember(display, query) { TranscriptFind.count(display.turns, query) }
+    FindBar(query, { query = it }, matchCount, matchesOnly) { matchesOnly = !matchesOnly }
     val starts = remember(display) { display.turns.map { it.startSeconds } }
     val player = tools.player
     val active = if (player.loaded && (player.playing || player.positionMs > 0)) Playback.activeIndex(starts, player.positionMs) else -1
@@ -233,7 +331,9 @@ internal fun MeetingTranscriptView(meeting: MeetingDetail, tools: HistoryTools) 
         activeIndex = active,
         canSeek = player.loaded,
         onPlayFrom = tools.onPlayFrom,
-        onSpeakerClick = { renaming = it }
+        onSpeakerClick = { renaming = it },
+        query = query,
+        matchesOnly = matchesOnly
     )
     renaming?.let { speaker ->
         TextInputDialog(
@@ -255,6 +355,7 @@ internal fun TextInputDialog(
     confirmLabel: String,
     singleLine: Boolean,
     allowBlank: Boolean,
+    maxLength: Int = Int.MAX_VALUE,
     onConfirm: (String) -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -265,7 +366,7 @@ internal fun TextInputDialog(
         text = {
             OutlinedTextField(
                 value = text,
-                onValueChange = { text = it },
+                onValueChange = { text = it.take(maxLength) },
                 label = { Text(label) },
                 singleLine = singleLine,
                 maxLines = if (singleLine) 1 else 12,
@@ -306,8 +407,9 @@ private enum class ToolDialog { RENAME, EDIT_TEXT, DELETE }
 
 /**
  * Share, copy, save, rename, edit and delete for the open recording, with the dialogs they need.
- * Sharing sends plain text, copying and saving use Markdown. Very long transcripts are not pushed
- * through the share sheet (the system limits how much data an intent can carry); they can be saved instead.
+ * Sharing always sends plain text (JSON included) so every app offers itself as a target; copying and saving
+ * use Markdown or JSON. Very long transcripts are not pushed through the share sheet (the system limits how
+ * much data an intent can carry); they can be saved instead.
  */
 @Composable
 internal fun MeetingActionBar(
@@ -319,23 +421,55 @@ internal fun MeetingActionBar(
     val context = LocalContext.current
     var dialog by remember { mutableStateOf<ToolDialog?>(null) }
     var pendingSave by remember { mutableStateOf<String?>(null) }
-    val saveLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/markdown")) { uri ->
+    val saveSaved: (Uri?) -> Unit = { uri ->
         val text = pendingSave
         pendingSave = null
         if (uri != null && text != null) writeExport(context, uri, text)
     }
+    val markdownSaver = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/markdown"), saveSaved)
+    val jsonSaver = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json"), saveSaved)
+    var menuOpen by remember { mutableStateOf(false) }
+
+    // Closes the menu, then runs [block] with the open recording's export document (nothing if it vanished).
+    fun export(block: (ExportDocument) -> Unit) {
+        menuOpen = false
+        tools.exportDocument()?.let(block)
+    }
 
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
-        ActionIcon(Icons.Default.Share, "Share as text") {
-            tools.exportDocument()?.let { shareText(context, it.title, TranscriptExport.plainText(it)) }
-        }
-        ActionIcon(Icons.Default.ContentCopy, "Copy as Markdown") {
-            tools.exportDocument()?.let { copyText(context, it.title, TranscriptExport.markdown(it)) }
-        }
-        ActionIcon(Icons.Default.Save, "Save Markdown file") {
-            tools.exportDocument()?.let {
-                pendingSave = TranscriptExport.markdown(it)
-                saveLauncher.launch(TranscriptExport.fileName(it.title, "md"))
+        Box {
+            ActionIcon(Icons.Default.Share, "Share or export") { menuOpen = true }
+            DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                DropdownMenuItem(
+                    text = { Text("Share as text") },
+                    onClick = { export { shareText(context, it.title, TranscriptExport.plainText(it)) } }
+                )
+                DropdownMenuItem(
+                    text = { Text("Copy as Markdown") },
+                    onClick = { export { copyText(context, it.title, TranscriptExport.markdown(it)) } }
+                )
+                DropdownMenuItem(
+                    text = { Text("Save Markdown file") },
+                    onClick = {
+                        export {
+                            pendingSave = TranscriptExport.markdown(it)
+                            markdownSaver.launch(TranscriptExport.fileName(it.title, "md"))
+                        }
+                    }
+                )
+                DropdownMenuItem(
+                    text = { Text("Share as JSON") },
+                    onClick = { export { shareText(context, it.title + " (JSON)", TranscriptExport.json(it)) } }
+                )
+                DropdownMenuItem(
+                    text = { Text("Save JSON file") },
+                    onClick = {
+                        export {
+                            pendingSave = TranscriptExport.json(it)
+                            jsonSaver.launch(TranscriptExport.fileName(it.title, "json"))
+                        }
+                    }
+                )
             }
         }
         ActionIcon(Icons.Default.Edit, "Rename") { dialog = ToolDialog.RENAME }
@@ -348,7 +482,7 @@ internal fun MeetingActionBar(
     when (dialog) {
         ToolDialog.RENAME -> TextInputDialog(
             title = "Rename recording", label = "Title", initial = title, confirmLabel = "Rename",
-            singleLine = true, allowBlank = false,
+            singleLine = true, allowBlank = false, maxLength = MAX_TITLE_CHARS,
             onConfirm = { tools.onRenameTitle(it); dialog = null },
             onDismiss = { dialog = null }
         )
@@ -393,7 +527,7 @@ private const val CLIPBOARD_TEXT_LIMIT = 400_000
 
 private fun shareText(context: Context, subject: String, text: String) {
     if (text.length > SHARE_TEXT_LIMIT) {
-        toast(context, "Too long to share as text. Use Save Markdown file instead.")
+        toast(context, "Too long to share as text. Use one of the Save file options instead.")
         return
     }
     val intent = Intent(Intent.ACTION_SEND).apply {
@@ -410,7 +544,7 @@ private fun shareText(context: Context, subject: String, text: String) {
 
 private fun copyText(context: Context, label: String, text: String) {
     if (text.length > CLIPBOARD_TEXT_LIMIT) {
-        toast(context, "Too long to copy. Use Save Markdown file instead.")
+        toast(context, "Too long to copy. Use one of the Save file options instead.")
         return
     }
     try {
