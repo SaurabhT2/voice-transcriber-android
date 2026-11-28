@@ -94,7 +94,7 @@ Local transcription skips silent sections (which Whisper tends to hallucinate te
 
 - **Search** titles and transcript text (on-device immediately; your workspace too when online).
 - **Play** the audio of recordings made on this phone and **tap any transcript line or timestamped note** to jump to it.
-- **Share** a transcript as text, **copy** it as Markdown, or **save** a Markdown file. Meeting notes are included when loaded.
+- **Share** a transcript as text, **copy** it as Markdown, or **save** Markdown, JSON or a paginated PDF file. Meeting notes are included when loaded.
 - **Rename** and **delete** recordings; **remove** failed or cancelled jobs without losing your audio.
 - **Edit** the text of an on-device transcript before it syncs, and **rename speakers** (names are stored on this phone only).
 - **Cancel** a Shared GPU upload or any queued or running job.
