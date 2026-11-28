@@ -488,6 +488,26 @@ class MeetingViewModel(app: Application, private val ownerId: String) : AndroidV
         }
     }
 
+    fun renameCurrentMeeting(title: String) {
+        val meeting = currentMeeting ?: return
+        val cleaned = title.trim()
+        if (cleaned.isBlank() || cleaned.length > 500) {
+            errorMessage = "Meeting title must contain 1–500 characters."
+            return
+        }
+        viewModelScope.launch {
+            try {
+                backend.renameMeeting(meeting.meetingId, cleaned)
+                currentMeeting = meeting.copy(title = cleaned)
+                refreshHistory()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                errorMessage = describe(error, "Unable to rename this meeting.")
+            }
+        }
+    }
+
     fun openRecording(item: RecordingItem) {
         if (item.isLocalOnly) {
             viewModelScope.launch {
