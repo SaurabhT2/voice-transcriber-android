@@ -96,7 +96,7 @@ Local transcription skips silent sections (which Whisper tends to hallucinate te
 - **Play** the audio of recordings made on this phone and **tap any transcript line or timestamped note** to jump to it.
 - **Share** a transcript as text, **copy** it as Markdown, or **save** Markdown, JSON or a paginated PDF file. Meeting notes are included when loaded.
 - **Rename** and **delete** recordings; **remove** failed or cancelled jobs without losing your audio.
-- **Edit** the text of an on-device transcript before it syncs, and **rename speakers** (names are stored on this phone only).
+- **Edit** the text of an on-device transcript before it syncs, and **rename speakers** (names are saved with synced workspace transcripts and kept locally as an offline fallback).
 - **Cancel** a Shared GPU upload or any queued or running job.
 
 Rename, delete and server-side search rely on row-level-security policies in the shared Supabase project; see [docs/phase2-backend-requirements.md](docs/phase2-backend-requirements.md).
