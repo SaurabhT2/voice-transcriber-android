@@ -431,6 +431,26 @@ class WorkspaceBackend(context: Context) {
         requestJson("GET", WorkspaceConfig.API_BASE_URL + "/api/v1/meetings/$meetingId", bearerToken = token)
     }.toMeetingDetail()
 
+    /** Rename a meeting through the owner-scoped Supabase Data API. */
+    suspend fun renameMeeting(meetingId: String, title: String) {
+        require(title.isNotBlank() && title.length <= 500) { "Meeting title must contain 1–500 characters." }
+        val userId = sessions.active()?.userId ?: throw SessionExpiredException()
+        val url = Uri.parse(WorkspaceConfig.SUPABASE_URL + "/rest/v1/meetings")
+            .buildUpon()
+            .appendQueryParameter("id", "eq.$meetingId")
+            .appendQueryParameter("owner_id", "eq.$userId")
+            .build().toString()
+        authed { token ->
+            requestText(
+                "PATCH",
+                url,
+                headers = publicHeaders + ("Prefer" to "return=minimal"),
+                bearerToken = token,
+                body = JSONObject().put("title", title.trim()).toString()
+            )
+        }
+    }
+
     suspend fun syncOfflineTranscript(
         eventId: String,
         title: String,
