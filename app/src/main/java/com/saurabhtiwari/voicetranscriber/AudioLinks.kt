@@ -7,6 +7,7 @@ import java.io.File
 object AudioKeys {
     fun event(eventId: String) = "event:$eventId"
     fun meeting(meetingId: String) = "meeting:$meetingId"
+    fun job(jobId: String) = "job:$jobId"
 }
 
 /**
@@ -40,6 +41,20 @@ class AudioLinkStore(private val file: File) {
     fun unlinkFile(audioFileName: String) {
         val all = load()
         if (all.values.removeAll { it == audioFileName }) save(all)
+    }
+
+    /**
+     * Unlinks [keys] and returns the audio file names that nothing links to any more, so they can be
+     * deleted with the transcript they belonged to. A file still linked from another transcript
+     * (the same recording transcribed twice) is kept. [titleHint] names a pre-link recording.
+     */
+    @Synchronized
+    fun unlinkAndCollectOrphans(keys: List<String>, titleHint: String? = null): List<String> {
+        val all = load()
+        val candidates = keys.mapNotNull { all[it] } + listOfNotNull(titleHint?.takeIf { isPlainName(it) })
+        keys.forEach { all.remove(it) }
+        save(all)
+        return candidates.distinct().filter { name -> all.values.none { it == name } }
     }
 
     /**

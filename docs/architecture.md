@@ -64,6 +64,25 @@ Base prefix: `/api/v1`. All protected endpoints require `Authorization: Bearer <
 
 The current web client reads the shared job and meeting lists from Supabase Data API using the same publishable key, signed-in access token and owner-scoped RLS policies. Android follows the same read path for cross-device history. Transcript detail and notes are read through the FastAPI contract.
 
+## Library tools (search, playback, export, edit)
+
+Everything below works on the recording currently open in **My recordings**.
+
+| Feature | How it works | Data that leaves the phone |
+|---|---|---|
+| Search | Matches titles and transcript text stored on the device immediately; for queries of 3+ characters it also asks the Supabase Data API which of the user's transcripts contain the text (`transcripts.content ilike`). A refusal degrades to device-only matching. | The search term, to the user's own Supabase project |
+| Playback | Plays the in-app recording with the platform `MediaPlayer`. Tap a transcript line or a timestamped note to jump to it. Only recordings still on this phone play; imported audio and recordings from other devices have no local file. | None |
+| Share / copy / save | Plain text through the share sheet, Markdown via copy or a saved `.md` file (system file picker). Very long transcripts are saved rather than shared (intent size limits). | Only what the user shares |
+| Rename | Local transcripts: on-device. Synced meetings: `PATCH meetings` through the Data API. | Title |
+| Edit transcript text | Only transcripts that have **not synced yet**; the corrected text is what syncs. Synced transcripts are read-only because the server copy cannot be updated from the client. | None |
+| Speaker names | Display overrides stored on the phone; the server's labels are never changed, so the web app is unaffected. | None |
+| Delete | Local transcripts: on-device. Synced meetings: `DELETE` on the user's `transcription_jobs` rows for the meeting, then the `meetings` row, plus the transcript copy and audio on this phone. Failed or cancelled jobs can be removed without touching the recording. | Delete requests |
+| Cancel | `POST /api/v1/transcriptions/{job_id}/cancel` for a running upload or any queued/processing job. | None |
+
+On-device files (app-private): `local_meetings/` (transcripts), `recordings/` (audio), `audio_links.json` (which recording belongs to which transcript; file names only, validated to stay inside `recordings/`) and `speaker_aliases.json`.
+
+Rename, delete and search use the Supabase Data API directly and need matching owner-scoped RLS policies; see [phase2-backend-requirements.md](phase2-backend-requirements.md). Deleting a meeting does not remove its audio object from the private bucket; that cleanup belongs in the API.
+
 ## Authentication
 
 - Use the same Supabase project as the web app.

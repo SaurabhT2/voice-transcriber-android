@@ -90,6 +90,17 @@ The compact multilingual model is downloaded only after the user requests local 
 
 Local transcription skips silent sections (which Whisper tends to hallucinate text for) and splits long audio at the quietest moment near each 30-second boundary instead of mid-word. Note: the spoken language is always auto-detected on device; the language picker only applies to Shared GPU jobs and to the language label stored with the transcript.
 
+## Working with your recordings
+
+- **Search** titles and transcript text (on-device immediately; your workspace too when online).
+- **Play** the audio of recordings made on this phone and **tap any transcript line or timestamped note** to jump to it.
+- **Share** a transcript as text, **copy** it as Markdown, or **save** a Markdown file. Meeting notes are included when loaded.
+- **Rename** and **delete** recordings; **remove** failed or cancelled jobs without losing your audio.
+- **Edit** the text of an on-device transcript before it syncs, and **rename speakers** (names are stored on this phone only).
+- **Cancel** a Shared GPU upload or any queued or running job.
+
+Rename, delete and server-side search rely on row-level-security policies in the shared Supabase project; see [docs/phase2-backend-requirements.md](docs/phase2-backend-requirements.md).
+
 ## Privacy and execution choices
 
 - Local mode does not upload audio. The app syncs transcript text and meeting metadata only.

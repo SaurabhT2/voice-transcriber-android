@@ -50,6 +50,11 @@ data class LiveTextChunk(
     val failed: Boolean
 )
 
+private const val MAX_TITLE_LENGTH = 200
+
+/** Asks PostgREST to return the affected rows, so "nothing changed" (blocked by RLS) is detectable. */
+private val RETURN_ROWS = mapOf("Prefer" to "return=representation")
+
 /** AES-GCM encryption with a non-exportable Android Keystore key. */
 internal class KeystoreBox(private val alias: String) {
     private fun key(): SecretKey {
@@ -359,6 +364,7 @@ class WorkspaceBackend(context: Context) {
         fileName: String,
         contentType: String,
         language: String?,
+        onJobCreated: (jobId: String) -> Unit = {},
         onProgress: (sentBytes: Long, totalBytes: Long) -> Unit = { _, _ -> }
     ): CloudJob {
         require(file.isFile && file.length() > 0L) { "The selected recording is empty or unavailable." }
@@ -372,6 +378,7 @@ class WorkspaceBackend(context: Context) {
             requestJson("POST", WorkspaceConfig.API_BASE_URL + "/api/v1/transcriptions/upload", bearerToken = token, body = createBody)
         }
         val jobId = uploadSession.getJSONObject("job").getString("job_id")
+        onJobCreated(jobId) // lets the caller cancel the job even while the upload is still running
         val uploadUrl = uploadSession.getString("upload_url")
         authed { token -> uploadSignedFile(uploadUrl, file, contentType, token, onProgress) }
         return authed { token ->
@@ -399,25 +406,86 @@ class WorkspaceBackend(context: Context) {
         requestJson("GET", WorkspaceConfig.API_BASE_URL + "/api/v1/meetings/$meetingId", bearerToken = token)
     }.toMeetingDetail()
 
-    /** Rename a meeting through the owner-scoped Supabase Data API. */
+    // ---- rename / delete / search (Supabase Data API; owner-scoped by row-level security) ----------
+
+    /** Renames a meeting. @throws IOException if the server did not change a row (e.g. not permitted). */
     suspend fun renameMeeting(meetingId: String, title: String) {
-        require(title.isNotBlank() && title.length <= 500) { "Meeting title must contain 1–500 characters." }
         val userId = sessions.active()?.userId ?: throw SessionExpiredException()
-        val url = Uri.parse(WorkspaceConfig.SUPABASE_URL + "/rest/v1/meetings")
-            .buildUpon()
-            .appendQueryParameter("id", "eq.$meetingId")
-            .appendQueryParameter("owner_id", "eq.$userId")
-            .build().toString()
-        authed { token ->
-            requestText(
-                "PATCH",
-                url,
-                headers = publicHeaders + ("Prefer" to "return=minimal"),
-                bearerToken = token,
-                body = JSONObject().put("title", title.trim()).toString()
-            )
+        val clean = title.trim().take(MAX_TITLE_LENGTH)
+        require(clean.isNotEmpty()) { "A title is required." }
+        val url = PostgrestUrl.build(
+            WorkspaceConfig.SUPABASE_URL + "/rest/v1/meetings",
+            "id" to "eq.$meetingId", "owner_id" to "eq.$userId"
+        )
+        val changed = authed { token ->
+            requestText("PATCH", url, publicHeaders + RETURN_ROWS, token, JSONObject().put("title", clean).toString())
         }
+        if (rowCount(changed) == 0) throw IOException("This recording could not be renamed. Check that you own it.")
     }
+
+    /**
+     * Deletes a meeting and the transcription jobs that point at it. The meeting row is what the
+     * server cascades from; audio objects in storage are not removed by this call.
+     * @throws IOException if the server did not delete the meeting (e.g. not permitted).
+     */
+    suspend fun deleteMeeting(meetingId: String) {
+        val userId = sessions.active()?.userId ?: throw SessionExpiredException()
+        val jobsUrl = PostgrestUrl.build(
+            WorkspaceConfig.SUPABASE_URL + "/rest/v1/transcription_jobs",
+            "meeting_id" to "eq.$meetingId", "owner_id" to "eq.$userId"
+        )
+        try {
+            // Jobs reference the meeting, so they go first. Best effort: if this is refused, the meeting delete decides.
+            authed { token -> requestText("DELETE", jobsUrl, publicHeaders, token) }
+        } catch (_: HttpException) {
+        }
+        val meetingUrl = PostgrestUrl.build(
+            WorkspaceConfig.SUPABASE_URL + "/rest/v1/meetings",
+            "id" to "eq.$meetingId", "owner_id" to "eq.$userId"
+        )
+        val deleted = authed { token -> requestText("DELETE", meetingUrl, publicHeaders + RETURN_ROWS, token) }
+        if (rowCount(deleted) == 0) throw IOException("This recording could not be deleted. Check that you own it.")
+    }
+
+    /** Removes a job that never produced a meeting (failed or cancelled). */
+    suspend fun deleteJob(jobId: String) {
+        val userId = sessions.active()?.userId ?: throw SessionExpiredException()
+        val url = PostgrestUrl.build(
+            WorkspaceConfig.SUPABASE_URL + "/rest/v1/transcription_jobs",
+            "id" to "eq.$jobId", "owner_id" to "eq.$userId"
+        )
+        val deleted = authed { token -> requestText("DELETE", url, publicHeaders + RETURN_ROWS, token) }
+        if (rowCount(deleted) == 0) throw IOException("This job could not be removed.")
+    }
+
+    /**
+     * Ids of the user's meetings whose transcript contains [term]. Search is a convenience, so a
+     * refusal (the table is not readable by this client, or the filter is rejected) yields no
+     * server matches rather than an error; matching on titles and on-device text still works.
+     */
+    suspend fun searchTranscripts(term: String): Set<String> {
+        val userId = sessions.active()?.userId ?: throw SessionExpiredException()
+        val escaped = HistorySearch.escapeForIlike(term)
+        if (escaped.isEmpty()) return emptySet()
+        val url = PostgrestUrl.build(
+            WorkspaceConfig.SUPABASE_URL + "/rest/v1/transcripts",
+            "select" to "meeting_id",
+            "owner_id" to "eq.$userId",
+            "content" to "ilike.*$escaped*",
+            "limit" to "100"
+        )
+        val text = try {
+            authed { token -> requestText("GET", url, publicHeaders, bearerToken = token) }
+        } catch (error: HttpException) {
+            if (error.code in 400..499 && error.code != 401) return emptySet()
+            throw error
+        }
+        val rows = JSONArray(text.ifBlank { "[]" })
+        return (0 until rows.length()).mapNotNull { rows.optJSONObject(it)?.optNullableString("meeting_id") }.toSet()
+    }
+
+    private fun rowCount(responseText: String): Int =
+        if (responseText.isBlank()) 0 else JSONArray(responseText).length()
 
     suspend fun syncOfflineTranscript(
         eventId: String,

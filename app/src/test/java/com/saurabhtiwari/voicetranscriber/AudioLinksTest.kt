@@ -72,4 +72,26 @@ class AudioLinksTest {
         assertNull(AudioLinkStore(linkFile).find("k"))
         assertTrue(File(root, "audio_links.json.corrupt").exists())
     }
+
+    @Test
+    fun orphanedAudioIsReportedButSharedAudioIsKept() {
+        val store = AudioLinkStore(linkFile)
+        store.link("event:e1", "shared.m4a")      // same recording transcribed twice: locally and on the GPU
+        store.link("meeting:m1", "shared.m4a")
+        store.link("meeting:m2", "solo.m4a")
+
+        assertEquals(emptyList<String>(), store.unlinkAndCollectOrphans(listOf("event:e1")))      // still used by m1
+        assertEquals(listOf("shared.m4a"), store.unlinkAndCollectOrphans(listOf("meeting:m1")))   // last link gone
+        assertEquals(listOf("solo.m4a"), AudioLinkStore(linkFile).unlinkAndCollectOrphans(listOf("meeting:m2")))
+        assertNull(AudioLinkStore(linkFile).find("meeting:m2"))
+    }
+
+    @Test
+    fun legacyRecordingFoundByTitleIsCollectedUnlessLinkedElsewhere() {
+        val store = AudioLinkStore(linkFile)
+        assertEquals(listOf("meeting_5.m4a"), store.unlinkAndCollectOrphans(listOf("event:none"), "meeting_5.m4a"))
+        store.link("meeting:m9", "meeting_6.m4a")
+        assertEquals(emptyList<String>(), store.unlinkAndCollectOrphans(listOf("event:none"), "meeting_6.m4a"))
+        assertEquals(emptyList<String>(), store.unlinkAndCollectOrphans(emptyList(), "../escape.m4a"))
+    }
 }

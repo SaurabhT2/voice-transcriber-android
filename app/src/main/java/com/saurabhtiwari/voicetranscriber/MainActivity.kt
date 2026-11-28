@@ -52,7 +52,6 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.UploadFile
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -71,12 +70,12 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
@@ -259,6 +258,7 @@ private fun MeetingWorkspaceScreen(
     val model by vm.modelState.collectAsStateWithLifecycle()
     val transcription by vm.transcriptionState.collectAsStateWithLifecycle()
     val live by vm.liveState.collectAsStateWithLifecycle()
+    val player by vm.playerState.collectAsStateWithLifecycle()
 
     LaunchedEffect(session.userId) { vm.onScreenEntered() }
     LaunchedEffect(vm.requiresSignIn) {
@@ -442,6 +442,7 @@ private fun MeetingWorkspaceScreen(
                         onLocalTranscribe = { vm.startLocalTranscription() },
                         onCloudTranscribe = { vm.startSharedGpuTranscription() },
                         onCancelLocal = { vm.cancelLocalTranscription() },
+                        onCancelCloud = { vm.cancelSharedGpuTranscription() },
                         canTranscribe = vm.selectedUri != null && !recording.active
                     )
                 }
@@ -461,7 +462,27 @@ private fun MeetingWorkspaceScreen(
                     notesStatus = vm.meetingNotesStatus,
                     onLoadNotes = { vm.loadNotes() },
                     onGenerateNotes = { vm.generateNotes() },
-                    onRenameMeeting = { vm.renameCurrentMeeting(it) }
+                    tools = HistoryTools(
+                        query = vm.searchQuery,
+                        onQueryChange = vm::updateSearch,
+                        searching = vm.searching,
+                        deviceText = vm.deviceText,
+                        remoteMatchIds = vm.remoteMatchIds,
+                        player = player,
+                        onTogglePlay = vm::togglePlayback,
+                        onSeekMs = vm::seekPlayback,
+                        onPlayFrom = vm::playFrom,
+                        speakerAliases = vm.speakerAliases,
+                        onRenameSpeaker = vm::renameSpeaker,
+                        onRenameTitle = vm::renameCurrent,
+                        onEditLocalText = vm::editLocalTranscript,
+                        onDeleteCurrent = vm::deleteCurrent,
+                        onClose = vm::closeDetail,
+                        exportDocument = vm::exportDocument,
+                        onCancelJob = vm::cancelJob,
+                        onRemoveItem = vm::deleteItem,
+                        onLeave = vm::pausePlayback
+                    )
                 )
             }
         }
@@ -640,6 +661,7 @@ private fun TranscribeContent(
     onLocalTranscribe: () -> Unit,
     onCloudTranscribe: () -> Unit,
     onCancelLocal: () -> Unit,
+    onCancelCloud: () -> Unit,
     canTranscribe: Boolean
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -831,6 +853,9 @@ private fun TranscribeContent(
                     Text(if (cloudBusy) "Uploading and processing…" else "Upload and transcribe")
                 }
                 Text("Audio is sent only after you choose Shared GPU and start the upload.", color = Muted, style = MaterialTheme.typography.labelSmall)
+                if (cloudBusy) {
+                    OutlinedButton(onClick = onCancelCloud, modifier = Modifier.fillMaxWidth()) { Text("Cancel upload") }
+                }
             }
             if (localTranscribing) LinearProgressIndicator(progress = { transcriptionProgress }, modifier = Modifier.fillMaxWidth())
             if (transcriptionStatus.isNotBlank()) Text(transcriptionStatus, color = Muted, style = MaterialTheme.typography.bodySmall)
@@ -850,7 +875,10 @@ private fun TranscribeContent(
     }
 }
 
-private const val HISTORY_DETAIL_INDEX = 3 // header, stats, filters, then the opened transcript
+private const val HISTORY_DETAIL_INDEX = 4 // header, stats, search, filters, then the opened transcript
+
+private val CANCELLABLE_STATUSES = setOf("queued", "processing", "upload_pending")
+private val REMOVABLE_STATUSES = setOf("failed", "cancelled")
 
 /**
  * Lazily composed list: only the rows on screen are built, so hundreds of recordings stay smooth.
@@ -873,16 +901,13 @@ private fun HistoryContent(
     notesStatus: String,
     onLoadNotes: () -> Unit,
     onGenerateNotes: () -> Unit,
-    onRenameMeeting: (String) -> Unit
+    tools: HistoryTools
 ) {
-    val context = LocalContext.current
-    var showRenameDialog by remember(currentMeeting?.meetingId) { mutableStateOf(false) }
-    var titleDraft by remember(currentMeeting?.meetingId) { mutableStateOf(currentMeeting?.title.orEmpty()) }
     val completed = recordings.count { it.status == "succeeded" }
     val processing = recordings.count { it.status == "queued" || it.status == "processing" }
     val attention = recordings.count { it.status == "failed" || it.status == "upload_pending" || it.isLocalOnly }
-    val filtered = remember(recordings, filter) {
-        recordings.filter { entry ->
+    val filtered = remember(recordings, filter, tools.query, tools.deviceText, tools.remoteMatchIds) {
+        HistorySearch.filter(recordings, tools.query, tools.deviceText, tools.remoteMatchIds).filter { entry ->
             when (filter) {
                 HistoryFilter.ALL -> true
                 HistoryFilter.PROCESSING -> entry.status == "queued" || entry.status == "processing"
@@ -890,6 +915,17 @@ private fun HistoryContent(
                 HistoryFilter.ATTENTION -> entry.status == "failed" || entry.status == "upload_pending" || entry.isLocalOnly
             }
         }
+    }
+    var pendingRemove by remember { mutableStateOf<RecordingItem?>(null) }
+    DisposableEffect(Unit) { onDispose { tools.onLeave() } } // leaving the tab stops playback
+    pendingRemove?.let { entry ->
+        ConfirmDialog(
+            title = "Remove this job?",
+            message = "\"" + entry.title + "\" will be removed from My recordings. The recording itself stays on this phone.",
+            confirmLabel = "Remove",
+            onConfirm = { tools.onRemoveItem(entry); pendingRemove = null },
+            onDismiss = { pendingRemove = null }
+        )
     }
     val listState = rememberLazyListState()
     LaunchedEffect(currentMeeting?.meetingId, currentLocalRecord?.eventId) {
@@ -927,6 +963,7 @@ private fun HistoryContent(
                 }
             }
         }
+        item(key = "search") { HistorySearchField(tools.query, tools.searching, tools.onQueryChange) }
         item(key = "filters") {
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 HistoryFilter.entries.forEach { option ->
@@ -942,57 +979,9 @@ private fun HistoryContent(
             item(key = "meeting") {
                 WorkspaceCard {
                     PanelHeading(Icons.Default.AudioFile, currentMeeting.title, "Transcript and meeting intelligence.", "MEETING DETAIL")
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(
-                            onClick = {
-                                titleDraft = currentMeeting.title
-                                showRenameDialog = true
-                            },
-                            modifier = Modifier.weight(1f)
-                        ) { Text("Rename") }
-                        OutlinedButton(
-                            onClick = {
-                                val payload = JSONObject()
-                                    .put("meeting_id", currentMeeting.meetingId)
-                                    .put("title", currentMeeting.title)
-                                    .put("transcript", currentMeeting.transcript)
-                                    .put("notes", meetingNotes ?: JSONObject.NULL)
-                                    .put("created_at", currentMeeting.createdAt)
-                                val send = Intent(Intent.ACTION_SEND).apply {
-                                    type = "application/json"
-                                    putExtra(Intent.EXTRA_SUBJECT, currentMeeting.title + " — Meeting Intelligence")
-                                    putExtra(Intent.EXTRA_TEXT, payload.toString(2))
-                                }
-                                context.startActivity(Intent.createChooser(send, "Export meeting JSON"))
-                            },
-                            modifier = Modifier.weight(1f)
-                        ) { Text("JSON") }
-                        OutlinedButton(
-                            onClick = {
-                                val text = buildString {
-                                appendLine("# ${currentMeeting.title}")
-                                appendLine()
-                                appendLine("## Transcript")
-                                appendLine(currentMeeting.transcript)
-                                meetingNotes?.let {
-                                    appendLine()
-                                    appendLine("## Meeting notes")
-                                    appendLine(it.toString(2))
-                                }
-                            }
-                            val send = Intent(Intent.ACTION_SEND).apply {
-                                type = "text/markdown"
-                                putExtra(Intent.EXTRA_SUBJECT, currentMeeting.title)
-                                putExtra(Intent.EXTRA_TEXT, text)
-                            }
-                            context.startActivity(Intent.createChooser(send, "Share or export meeting"))
-                        },
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Text("Share / export")
-                        }
-                    }
-                    TranscriptBody(currentMeeting)
+                    MeetingActionBar(currentMeeting.title, tools, editableText = null, isLocalOnly = false)
+                    PlayerBar(tools.player, tools.onTogglePlay, tools.onSeekMs)
+                    MeetingTranscriptView(currentMeeting, tools)
                     Text(
                         listOfNotNull(currentMeeting.source, currentMeeting.language, currentMeeting.model).joinToString(" · "),
                         color = Muted,
@@ -1011,13 +1000,19 @@ private fun HistoryContent(
                         Text(notesStatus, color = Muted, style = MaterialTheme.typography.bodySmall)
                         if (notesBusy) LinearProgressIndicator(Modifier.fillMaxWidth(), color = Blue)
                     }
-                    meetingNotes?.let { NotesContent(it) }
+                    meetingNotes?.let { NotesContent(it, if (tools.player.loaded) tools.onPlayFrom else null) }
                 }
             }
         } else if (currentLocalRecord != null) {
             item(key = "local") {
                 WorkspaceCard {
                     PanelHeading(Icons.Default.Lock, currentLocalRecord.title, "Saved privately on this device.", "LOCAL TRANSCRIPT")
+                    MeetingActionBar(
+                        currentLocalRecord.title, tools,
+                        editableText = currentLocalRecord.transcript.takeIf { currentLocalRecord.meetingId == null },
+                        isLocalOnly = true
+                    )
+                    PlayerBar(tools.player, tools.onTogglePlay, tools.onSeekMs)
                     Text(currentLocalRecord.transcript, color = Ink, style = MaterialTheme.typography.bodyMedium)
                     InfoMessage("This transcript has not synced to your online workspace yet. It will retry when connectivity is available.", AmberTint, Amber)
                 }
@@ -1036,9 +1031,17 @@ private fun HistoryContent(
             item(key = "empty") {
                 WorkspaceCard {
                     androidx.compose.material3.Icon(Icons.Default.AudioFile, null, tint = Muted, modifier = Modifier.size(25.dp))
-                    Text(if (recordings.isEmpty()) "No recordings yet" else "No recordings in this view", fontWeight = FontWeight.SemiBold)
+                    Text(
+                        when {
+                            recordings.isEmpty() -> "No recordings yet"
+                            tools.query.isNotBlank() -> "No matches"
+                            else -> "No recordings in this view"
+                        },
+                        fontWeight = FontWeight.SemiBold
+                    )
                     Text(
                         if (recordings.isEmpty()) "Record or upload audio from the Transcribe tab. It will appear here with its status and transcript."
+                        else if (tools.query.isNotBlank()) "Nothing matches \"" + tools.query.trim() + "\". Transcript search covers this device and, when you are online, your workspace."
                         else "Choose another filter to view your recordings.",
                         color = Muted,
                         style = MaterialTheme.typography.bodySmall
@@ -1047,125 +1050,35 @@ private fun HistoryContent(
             }
         } else {
             items(filtered, key = { it.id }) { entry ->
-                RecordingRow(item = entry, onClick = { onOpen(entry) })
+                val snippet = remember(entry, tools.query, tools.deviceText) {
+                    HistorySearch.snippet(entry, tools.query, tools.deviceText)
+                }
+                RecordingRow(
+                    item = entry,
+                    onClick = { onOpen(entry) },
+                    snippet = snippet,
+                    onCancel = if (entry.status in CANCELLABLE_STATUSES) { { tools.onCancelJob(entry) } } else null,
+                    onRemove = if (entry.status in REMOVABLE_STATUSES) { { pendingRemove = entry } } else null
+                )
             }
         }
         item(key = "footer") { Footer() }
     }
-    if (currentMeeting != null && showRenameDialog) {
-        AlertDialog(
-            onDismissRequest = { showRenameDialog = false },
-            title = { Text("Rename meeting") },
-            text = {
-                OutlinedTextField(
-                    value = titleDraft,
-                    onValueChange = { titleDraft = it.take(500) },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                    label = { Text("Meeting title") }
-                )
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        onRenameMeeting(titleDraft)
-                        showRenameDialog = false
-                    },
-                    enabled = titleDraft.isNotBlank() && titleDraft.trim() != currentMeeting.title
-                ) { Text("Save") }
-            },
-            dismissButton = {
-                TextButton(onClick = { showRenameDialog = false }) { Text("Cancel") }
-            }
-        )
-    }
 }
 
-private val SpeakerPalette = listOf(Blue, Green, Violet, Amber, Color(0xFFC2410C), Color(0xFF0E7490))
+internal val SpeakerPalette = listOf(Blue, Green, Violet, Amber, Color(0xFFC2410C), Color(0xFF0E7490))
 
-private fun speakerColor(index: Int): Color =
+internal fun speakerColor(index: Int): Color =
     if (index < 0) Muted else SpeakerPalette[index % SpeakerPalette.size]
 
-/** Speaker-attributed transcript when the server returned speaker labels; plain text otherwise. */
 @Composable
-private fun TranscriptBody(meeting: MeetingDetail) {
-    val parsed = remember(meeting.meetingId, meeting.segments, meeting.speakers) {
-        SpeakerTranscripts.build(meeting.segments, meeting.speakers)
-    }
-    var query by remember(meeting.meetingId) { mutableStateOf("") }
-    val normalizedQuery = query.trim()
-    OutlinedTextField(
-        value = query,
-        onValueChange = { query = it },
-        modifier = Modifier.fillMaxWidth(),
-        singleLine = true,
-        label = { Text("Search this transcript") },
-        placeholder = { Text("Find a word or phrase") }
-    )
-    if (!parsed.hasSpeakers) {
-        val transcript = meeting.transcript.ifBlank { "Transcript unavailable." }
-        val visible = if (normalizedQuery.isBlank()) transcript else transcript
-            .split(Regex("(?<=[.!?])\\s+"))
-            .filter { it.contains(normalizedQuery, ignoreCase = true) }
-            .joinToString("\n\n")
-        Text(
-            if (normalizedQuery.isNotBlank() && visible.isBlank()) "No matching transcript text." else visible,
-            color = Ink,
-            style = MaterialTheme.typography.bodyMedium
-        )
-        return
-    }
-    val visibleTurns = if (normalizedQuery.isBlank()) parsed.turns else
-        parsed.turns.filter { it.text.contains(normalizedQuery, ignoreCase = true) || (it.label?.contains(normalizedQuery, true) == true) }
-    if (normalizedQuery.isNotBlank() && visibleTurns.isEmpty()) {
-        Text("No matching transcript text.", color = Muted, style = MaterialTheme.typography.bodySmall)
-    }
-    Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text("SPEAKERS", color = Muted, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
-            parsed.speakers.forEach { speaker ->
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Box(Modifier.size(10.dp).clip(CircleShape).background(speakerColor(speaker.colorIndex)))
-                    Text(speaker.label, color = Ink, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
-                    Text("${(speaker.share * 100).toInt()}%", color = Muted, style = MaterialTheme.typography.labelSmall)
-                }
-                LinearProgressIndicator(
-                    progress = { speaker.share.toFloat().coerceIn(0f, 1f) },
-                    modifier = Modifier.fillMaxWidth(),
-                    color = speakerColor(speaker.colorIndex),
-                    trackColor = Border
-                )
-            }
-        }
-        visibleTurns.forEach { turn ->
-            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Text(
-                        turn.label ?: "Unlabeled",
-                        color = speakerColor(turn.colorIndex),
-                        fontWeight = FontWeight.SemiBold,
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                    Text(
-                        SpeakerTranscripts.formatTimestamp(turn.startSeconds),
-                        color = Muted,
-                        style = MaterialTheme.typography.labelSmall
-                    )
-                }
-                Text(turn.text, color = Ink, style = MaterialTheme.typography.bodyMedium)
-            }
-        }
-    }
-}
-
-@Composable
-private fun RecordingRow(item: RecordingItem, onClick: () -> Unit) {
+private fun RecordingRow(
+    item: RecordingItem,
+    onClick: () -> Unit,
+    snippet: String? = null,
+    onCancel: (() -> Unit)? = null,
+    onRemove: (() -> Unit)? = null
+) {
     WorkspaceCard {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             Box(
@@ -1181,6 +1094,9 @@ private fun RecordingRow(item: RecordingItem, onClick: () -> Unit) {
                     color = Muted,
                     style = MaterialTheme.typography.labelSmall
                 )
+                if (snippet != null) {
+                    Text(snippet, color = Muted, style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                }
                 if (item.isLocalOnly) {
                     Text("On this device · waiting to sync", color = Amber, style = MaterialTheme.typography.labelSmall)
                 }
@@ -1195,13 +1111,15 @@ private fun RecordingRow(item: RecordingItem, onClick: () -> Unit) {
                         Text("Open")
                     }
                 }
+                if (onCancel != null) OutlinedButton(onClick = onCancel) { Text("Cancel") }
+                if (onRemove != null) OutlinedButton(onClick = onRemove) { Text("Remove") }
             }
         }
     }
 }
 
 @Composable
-private fun NotesContent(notes: JSONObject) {
+private fun NotesContent(notes: JSONObject, onSeek: ((Double) -> Unit)?) {
     val summary = notes.optString("executive_summary")
     if (summary.isNotBlank()) {
         Text("Executive summary", fontWeight = FontWeight.SemiBold)
@@ -1210,10 +1128,7 @@ private fun NotesContent(notes: JSONObject) {
     val groups = listOf(
         "Key points" to notes.optJSONArray("key_points"),
         "Decisions" to notes.optJSONArray("decisions"),
-        "Action items" to notes.optJSONArray("action_items"),
-        "Open questions" to notes.optJSONArray("open_questions"),
-        "Risks and blockers" to (notes.optJSONArray("risks_and_blockers") ?: notes.optJSONArray("risks")),
-        "Next steps" to notes.optJSONArray("next_steps")
+        "Action items" to notes.optJSONArray("action_items")
     )
     groups.forEach { (title, values) ->
         if (values != null && values.length() > 0) {
@@ -1221,7 +1136,16 @@ private fun NotesContent(notes: JSONObject) {
             for (index in 0 until minOf(values.length(), 8)) {
                 val item = values.optJSONObject(index) ?: continue
                 val text = item.optString("text").ifBlank { item.optString("task") }
-                if (text.isNotBlank()) Text("• " + text, color = Muted, style = MaterialTheme.typography.bodySmall)
+                if (text.isNotBlank()) {
+                    val start = item.optDouble("start_seconds", Double.NaN)
+                    val stamp = if (start.isNaN()) "" else "[" + SpeakerTranscripts.formatTimestamp(start) + "] "
+                    Text(
+                        "• " + stamp + text,
+                        color = Muted,
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = if (onSeek != null && !start.isNaN()) Modifier.clickable { onSeek(start) } else Modifier
+                    )
+                }
             }
         }
     }

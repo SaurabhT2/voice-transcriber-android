@@ -17,6 +17,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -128,6 +129,11 @@ class MeetingViewModel(app: Application, private val ownerId: String) : AndroidV
     val transcriptionState: StateFlow<TranscriptionState> = transcriber.state
     val liveState: StateFlow<LiveState> = services.live.state
 
+    private val audioLinks = services.audioLinks
+    private val speakerAliasStore = services.speakerAliases
+    private val player = AudioPlayerController(viewModelScope)
+    val playerState: StateFlow<PlayerState> = player.state
+
     var tab by mutableStateOf(WorkspaceTab.OVERVIEW)
 
     /** Stream the recording to the worker for live text (beta). Chosen before recording starts. */
@@ -140,6 +146,19 @@ class MeetingViewModel(app: Application, private val ownerId: String) : AndroidV
     var historyError by mutableStateOf("")
         private set
     var historyFilter by mutableStateOf(HistoryFilter.ALL)
+
+    var searchQuery by mutableStateOf("")
+        private set
+    var searching by mutableStateOf(false)
+        private set
+
+    /** Meeting ids whose transcripts matched the current query on the server. */
+    var remoteMatchIds by mutableStateOf<Set<String>>(emptySet())
+        private set
+
+    /** Transcript text stored on this device, keyed by local event id and by meeting id. */
+    var deviceText by mutableStateOf<Map<String, String>>(emptyMap())
+        private set
 
     var selectedUri by mutableStateOf<Uri?>(null)
         private set
@@ -165,12 +184,19 @@ class MeetingViewModel(app: Application, private val ownerId: String) : AndroidV
         private set
     var cloudJob by mutableStateOf<CloudJob?>(null)
         private set
+    private var cloudRun: Job? = null
+    private var activeCloudJobId: String? = null
+    private var pendingLocalAudio: File? = null
 
     var currentMeeting by mutableStateOf<MeetingDetail?>(null)
         private set
     var currentLocalRecord by mutableStateOf<LocalMeetingRecord?>(null)
         private set
     var meetingNotes by mutableStateOf<JSONObject?>(null)
+        private set
+
+    /** Speaker names chosen on this device for the open meeting (server labels are never changed). */
+    var speakerAliases by mutableStateOf<Map<String, String>>(emptyMap())
         private set
     var notesBusy by mutableStateOf(false)
         private set
@@ -186,6 +212,8 @@ class MeetingViewModel(app: Application, private val ownerId: String) : AndroidV
     private var remoteItems: List<RecordingItem> = emptyList()
     private var historyJob: Job? = null
     private var syncJob: Job? = null
+    private var searchJob: Job? = null
+    private var detailRequest = 0
 
     init {
         viewModelScope.launch { RecordingController.state.collect { onRecordingState(it) } }
@@ -208,6 +236,7 @@ class MeetingViewModel(app: Application, private val ownerId: String) : AndroidV
     }
 
     override fun onCleared() {
+        player.release()
         transcriber.releaseModelIfIdle()
         super.onCleared()
     }
@@ -239,6 +268,7 @@ class MeetingViewModel(app: Application, private val ownerId: String) : AndroidV
             recordingError = state.error
             RecordingController.clearError()
         }
+        if (state.active) player.pause()
         val active = state.file
         if (state.active && active != null && selectedFile != active) {
             selectRecording(active, "Recording in progress.")
@@ -306,6 +336,7 @@ class MeetingViewModel(app: Application, private val ownerId: String) : AndroidV
         }
         currentMeeting = null
         currentLocalRecord = null
+        pendingLocalAudio = selectedFile
         transcriber.reset()
         transcriber.start(
             uri = uri,
@@ -320,17 +351,23 @@ class MeetingViewModel(app: Application, private val ownerId: String) : AndroidV
 
     private fun onLocalTranscriptSaved(record: LocalMeetingRecord) {
         if (record.ownerId != ownerId) return
+        val audio = pendingLocalAudio
         viewModelScope.launch {
-            currentLocalRecord = record
-            currentMeeting = null
+            if (audio != null) {
+                withContext(Dispatchers.IO) { audioLinks.link(AudioKeys.event(record.eventId), audio.name) }
+            }
+            showLocal(record)
             try {
                 services.sync.syncPending()
                 val meetingId = withContext(Dispatchers.IO) {
                     store.list(ownerId).firstOrNull { it.eventId == record.eventId }?.meetingId
                 }
                 if (meetingId != null) {
-                    currentMeeting = backend.getMeeting(meetingId)
-                    currentLocalRecord = null
+                    val meeting = backend.getMeeting(meetingId)
+                    if (audio != null) {
+                        withContext(Dispatchers.IO) { audioLinks.link(AudioKeys.meeting(meetingId), audio.name) }
+                    }
+                    showMeeting(meeting)
                     transcriber.postStatus("Transcription complete. Transcript synced to your workspace.")
                     tab = WorkspaceTab.HISTORY
                 } else {
@@ -354,8 +391,9 @@ class MeetingViewModel(app: Application, private val ownerId: String) : AndroidV
         val name = selectedName
         val existingFile = selectedFile
         val requestedLanguage = if (language == "auto") null else language
-        viewModelScope.launch {
+        cloudRun = viewModelScope.launch {
             cloudBusy = true
+            activeCloudJobId = null
             cloudStatus = "Preparing secure upload…"
             cloudJob = null
             errorMessage = ""
@@ -368,7 +406,14 @@ class MeetingViewModel(app: Application, private val ownerId: String) : AndroidV
                     file = file,
                     fileName = name.ifBlank { file.name },
                     contentType = contentType,
-                    language = requestedLanguage
+                    language = requestedLanguage,
+                    onJobCreated = { jobId ->
+                        activeCloudJobId = jobId
+                        // Link early: the job may finish while the app is closed, and its audio should still play.
+                        existingFile?.let { recorded ->
+                            viewModelScope.launch(Dispatchers.IO) { audioLinks.link(AudioKeys.job(jobId), recorded.name) }
+                        }
+                    }
                 ) { sent, total ->
                     cloudStatus = "Uploading audio… " + (sent * 100L / total.coerceAtLeast(1L)) + "%"
                 }
@@ -408,10 +453,16 @@ class MeetingViewModel(app: Application, private val ownerId: String) : AndroidV
                 }
                 val meetingId = job.meetingId
                 if (job.status == "succeeded" && !meetingId.isNullOrBlank()) {
-                    currentMeeting = backend.getMeeting(meetingId)
-                    currentLocalRecord = null
+                    val meeting = backend.getMeeting(meetingId)
+                    existingFile?.let { recorded ->
+                        withContext(Dispatchers.IO) { audioLinks.link(AudioKeys.meeting(meetingId), recorded.name) }
+                    }
                     meetingNotes = null
+                    showMeeting(meeting, extraKeys = listOf(AudioKeys.job(job.jobId)))
                     tab = WorkspaceTab.HISTORY
+                    refreshHistory()
+                } else if (job.status == "cancelled") {
+                    cloudStatus = "This transcription was cancelled. Your original audio remains on this device."
                     refreshHistory()
                 } else if (job.status == "failed") {
                     errorMessage = job.errorCode ?: "Transcription failed. Your original audio remains on this device."
@@ -449,6 +500,7 @@ class MeetingViewModel(app: Application, private val ownerId: String) : AndroidV
                     historyError = describe(error, "Unable to refresh recordings.")
                 }
                 val localOnly = localOnlyItems()
+                deviceText = loadDeviceText()
                 history = (remoteItems + localOnly).sortedByDescending { it.createdAt }
                 if (localOnly.isNotEmpty()) triggerSync()
             } finally {
@@ -488,33 +540,11 @@ class MeetingViewModel(app: Application, private val ownerId: String) : AndroidV
         }
     }
 
-    fun renameCurrentMeeting(title: String) {
-        val meeting = currentMeeting ?: return
-        val cleaned = title.trim()
-        if (cleaned.isBlank() || cleaned.length > 500) {
-            errorMessage = "Meeting title must contain 1–500 characters."
-            return
-        }
-        viewModelScope.launch {
-            try {
-                backend.renameMeeting(meeting.meetingId, cleaned)
-                currentMeeting = meeting.copy(title = cleaned)
-                refreshHistory()
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (error: Exception) {
-                errorMessage = describe(error, "Unable to rename this meeting.")
-            }
-        }
-    }
-
     fun openRecording(item: RecordingItem) {
         if (item.isLocalOnly) {
             viewModelScope.launch {
-                currentLocalRecord = withContext(Dispatchers.IO) {
-                    store.list(ownerId).firstOrNull { it.eventId == item.id }
-                }
-                currentMeeting = null
+                val record = withContext(Dispatchers.IO) { store.list(ownerId).firstOrNull { it.eventId == item.id } }
+                if (record != null) showLocal(record)
                 meetingNotes = null
                 meetingNotesStatus = ""
                 tab = WorkspaceTab.HISTORY
@@ -525,15 +555,262 @@ class MeetingViewModel(app: Application, private val ownerId: String) : AndroidV
         viewModelScope.launch {
             errorMessage = ""
             try {
-                currentMeeting = backend.getMeeting(meetingId)
-                currentLocalRecord = null
+                val meeting = backend.getMeeting(meetingId)
                 meetingNotes = null
                 meetingNotesStatus = ""
+                showMeeting(meeting, extraKeys = listOf(AudioKeys.job(item.id)))
                 tab = WorkspaceTab.HISTORY
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Exception) {
                 errorMessage = describe(error, "Unable to open this transcript.")
+            }
+        }
+    }
+
+    // ---- open recording: audio, speaker names, close -----------------------------------------
+
+    private fun showMeeting(meeting: MeetingDetail, extraKeys: List<String> = emptyList()) {
+        currentMeeting = meeting
+        currentLocalRecord = null
+        onDetailChanged(AudioKeys.meeting(meeting.meetingId), meeting.title, extraKeys)
+    }
+
+    private fun showLocal(record: LocalMeetingRecord) {
+        currentLocalRecord = record
+        currentMeeting = null
+        onDetailChanged(
+            AudioKeys.event(record.eventId), record.title,
+            listOfNotNull(record.meetingId?.let(AudioKeys::meeting))
+        )
+    }
+
+    /** Loads the speaker names and, when the recording is still on this phone, its audio. */
+    private fun onDetailChanged(key: String, title: String, extraKeys: List<String>) {
+        val request = ++detailRequest
+        speakerAliases = emptyMap()
+        player.release()
+        viewModelScope.launch {
+            val (aliases, audio) = withContext(Dispatchers.IO) {
+                speakerAliasStore.get(key) to audioLinks.resolve(services.recordingsDir, listOf(key) + extraKeys, title)
+            }
+            if (request != detailRequest) return@launch // another recording was opened meanwhile
+            speakerAliases = aliases
+            if (audio != null) player.load(audio)
+        }
+    }
+
+    private fun currentKey(): String? =
+        currentMeeting?.let { AudioKeys.meeting(it.meetingId) } ?: currentLocalRecord?.let { AudioKeys.event(it.eventId) }
+
+    fun closeDetail() {
+        detailRequest++
+        player.release()
+        currentMeeting = null
+        currentLocalRecord = null
+        meetingNotes = null
+        meetingNotesStatus = ""
+        speakerAliases = emptyMap()
+    }
+
+    // ---- playback --------------------------------------------------------------------------
+
+    fun togglePlayback() {
+        if (!RecordingController.state.value.active) player.toggle()
+    }
+
+    fun seekPlayback(positionMs: Int) = player.seekTo(positionMs)
+
+    fun playFrom(startSeconds: Double) {
+        if (!RecordingController.state.value.active) player.playFrom(startSeconds)
+    }
+
+    fun pausePlayback() = player.pause()
+
+    // ---- search ----------------------------------------------------------------------------
+
+    fun updateSearch(query: String) {
+        searchQuery = query
+        searchJob?.cancel()
+        val term = query.trim()
+        if (term.length < HistorySearch.MIN_REMOTE_QUERY_LENGTH) {
+            remoteMatchIds = emptySet()
+            searching = false
+            return
+        }
+        searchJob = viewModelScope.launch {
+            searching = true
+            try {
+                delay(SEARCH_DEBOUNCE_MS)
+                remoteMatchIds = try {
+                    backend.searchTranscripts(term)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Exception) {
+                    describe(error, "") // a lapsed session still routes the user to sign-in
+                    emptySet()
+                }
+            } finally {
+                if (isActive) searching = false // a newer search that replaced this one owns the flag
+            }
+        }
+    }
+
+    private suspend fun loadDeviceText(): Map<String, String> = withContext(Dispatchers.IO) {
+        buildMap<String, String> {
+            store.list(ownerId).forEach { record ->
+                put(record.eventId, record.transcript)
+                record.meetingId?.let { put(it, record.transcript) }
+            }
+        }
+    }
+
+    // ---- rename, edit, delete, export ------------------------------------------------------
+
+    /** Runs an edit that changes stored data, reporting failures and refreshing the list afterwards. */
+    private fun launchEdit(failure: String, block: suspend () -> Unit) {
+        viewModelScope.launch {
+            errorMessage = ""
+            try {
+                block()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                errorMessage = describe(error, failure)
+            }
+            refreshHistory()
+        }
+    }
+
+    fun renameCurrent(newTitle: String) {
+        val title = newTitle.trim()
+        val meeting = currentMeeting
+        val local = currentLocalRecord
+        if (title.isEmpty() || (meeting == null && local == null)) return
+        launchEdit("Unable to rename this recording.") {
+            if (meeting != null) {
+                backend.renameMeeting(meeting.meetingId, title)
+                if (currentMeeting?.meetingId == meeting.meetingId) currentMeeting = meeting.copy(title = title)
+                history = history.map { if (it.meetingId == meeting.meetingId) it.copy(title = title) else it }
+            } else if (local != null) {
+                val renamed = withContext(Dispatchers.IO) { store.rename(ownerId, local.eventId, title) }
+                if (renamed && currentLocalRecord?.eventId == local.eventId) currentLocalRecord = local.copy(title = title)
+                history = history.map { if (it.id == local.eventId) it.copy(title = title) else it }
+            }
+        }
+    }
+
+    /** Corrects an on-device transcript that has not synced yet; the corrected text is what syncs. */
+    fun editLocalTranscript(newText: String) {
+        val local = currentLocalRecord ?: return
+        val text = newText.trim()
+        if (text.isEmpty()) return
+        launchEdit("Unable to save the corrected transcript.") {
+            val saved = withContext(Dispatchers.IO) { store.updateTranscript(ownerId, local.eventId, text) }
+            if (saved) {
+                if (currentLocalRecord?.eventId == local.eventId) currentLocalRecord = local.copy(transcript = text)
+            } else {
+                errorMessage = "This transcript has already synced to your workspace and can no longer be edited here."
+            }
+        }
+    }
+
+    fun renameSpeaker(speakerId: String, name: String) {
+        val key = currentKey() ?: return
+        viewModelScope.launch {
+            val updated = withContext(Dispatchers.IO) {
+                speakerAliasStore.set(key, speakerId, name)
+                speakerAliasStore.get(key)
+            }
+            if (currentKey() == key) speakerAliases = updated
+        }
+    }
+
+    fun deleteCurrent() {
+        val meeting = currentMeeting
+        val local = currentLocalRecord
+        when {
+            meeting != null -> deleteMeeting(meeting.meetingId, meeting.title, jobId = null)
+            local != null -> deleteLocalRecord(local)
+        }
+    }
+
+    fun deleteItem(item: RecordingItem) {
+        val meetingId = item.meetingId
+        when {
+            item.isLocalOnly -> viewModelScope.launch {
+                withContext(Dispatchers.IO) { store.find(ownerId, item.id) }?.let { deleteLocalRecord(it) }
+            }
+            meetingId != null -> deleteMeeting(meetingId, item.title, jobId = item.id)
+            else -> launchEdit("Unable to remove this job.") {
+                backend.deleteJob(item.id)
+                // Removing a failed job never deletes the user's own recording; only the link goes.
+                withContext(Dispatchers.IO) { audioLinks.unlink(AudioKeys.job(item.id)) }
+            }
+        }
+    }
+
+    private fun deleteMeeting(meetingId: String, title: String, jobId: String?) {
+        launchEdit("Unable to delete this recording.") {
+            backend.deleteMeeting(meetingId)
+            if (currentMeeting?.meetingId == meetingId) closeDetail()
+            val removedLocal = withContext(Dispatchers.IO) { store.deleteByMeetingId(ownerId, meetingId) }
+            val keys = listOf(AudioKeys.meeting(meetingId)) +
+                removedLocal.map { AudioKeys.event(it.eventId) } +
+                listOfNotNull(jobId?.let(AudioKeys::job))
+            purgeLocalCopies(keys, title)
+            history = history.filterNot { it.meetingId == meetingId }
+        }
+    }
+
+    private fun deleteLocalRecord(record: LocalMeetingRecord) {
+        launchEdit("Unable to delete this transcript.") {
+            if (currentLocalRecord?.eventId == record.eventId) closeDetail()
+            withContext(Dispatchers.IO) { store.delete(ownerId, record.eventId) }
+            purgeLocalCopies(listOf(AudioKeys.event(record.eventId)), record.title)
+            history = history.filterNot { it.id == record.eventId }
+        }
+    }
+
+    /** Removes speaker names and links for deleted transcripts, and audio that nothing else uses. */
+    private suspend fun purgeLocalCopies(keys: List<String>, title: String?) = withContext(Dispatchers.IO) {
+        keys.forEach(speakerAliasStore::clear)
+        audioLinks.unlinkAndCollectOrphans(keys, title).forEach { name ->
+            File(services.recordingsDir, name).takeIf { it.isFile }?.delete()
+        }
+    }
+
+    /** The open recording as shareable text; null when nothing is open. */
+    fun exportDocument(): ExportDocument? =
+        currentMeeting?.let { TranscriptExport.documentFor(it, speakerAliases, meetingNotes) }
+            ?: currentLocalRecord?.let { TranscriptExport.documentFor(it) }
+
+    // ---- cancelling shared-GPU jobs --------------------------------------------------------
+
+    /** Stops the upload or wait that is in progress and cancels the job on the server if it exists. */
+    fun cancelSharedGpuTranscription() {
+        if (!cloudBusy) return
+        val jobId = activeCloudJobId
+        cloudRun?.cancel()
+        cloudStatus = "Cancelling…"
+        launchEdit("Unable to cancel the job.") {
+            cloudStatus = if (jobId == null) {
+                "Cancelled before the upload finished."
+            } else {
+                backend.cancelCloudJob(jobId)
+                "Cancelled. Your original audio remains on this device."
+            }
+        }
+    }
+
+    /** Cancels a queued, uploading or processing job listed in My recordings. */
+    fun cancelJob(item: RecordingItem) {
+        launchEdit("Unable to cancel this job.") {
+            val job = backend.cancelCloudJob(item.id)
+            if (cloudJob?.jobId == item.id) {
+                cloudRun?.cancel()
+                cloudJob = job
+                cloudStatus = "Cancelled. Your original audio remains on this device."
             }
         }
     }
@@ -625,6 +902,7 @@ class MeetingViewModel(app: Application, private val ownerId: String) : AndroidV
         private const val MAX_CLOUD_WAIT_MS = 45L * 60L * 1000L
         private const val MAX_POLL_FAILURES = 5
         private const val NOTES_POLL_ATTEMPTS = 180
+        private const val SEARCH_DEBOUNCE_MS = 350L
 
         fun factory(ownerId: String) = viewModelFactory {
             initializer { MeetingViewModel(this[APPLICATION_KEY] as Application, ownerId) }
