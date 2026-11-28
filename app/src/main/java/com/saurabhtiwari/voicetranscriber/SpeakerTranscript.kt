@@ -39,7 +39,7 @@ object SpeakerTranscripts {
         for (i in 0 until speakers.length()) {
             val row = speakers.optJSONObject(i) ?: continue
             val id = row.optNullableString("speaker_id") ?: continue
-            labels[id] = row.optNullableString("label") ?: defaultLabel(id)
+            labels[id] = row.optNullableString("display_name") ?: row.optNullableString("label") ?: defaultLabel(id)
             reportedSeconds[id] = row.optDouble("speaking_seconds", 0.0).coerceAtLeast(0.0)
         }
 
