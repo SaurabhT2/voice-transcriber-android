@@ -59,6 +59,9 @@ Phase 2 library tools, stacked on top (this integration):
 5. **Rename, delete, edit:** rename (synced and on-device), delete with job and local cleanup, remove failed jobs, edit unsynced on-device text, speaker display names persisted in the synced transcript's `speakers` JSON (with device-local fallback). This replaces the earlier rename, which could not detect a refused update.
 6. **Cancel** for shared-GPU uploads and queued or running jobs.
 7. Notes sections accept both object and plain-string entries, and the legacy `risks` key.
+8. **PDF export:** added a paginated Android `PdfDocument` exporter and a Save PDF action alongside Markdown and JSON.
+9. **Speaker-name persistence:** synced-meeting aliases are stored in the owner-scoped transcript `speakers` JSON as `display_name`, preserving provider labels; device-local aliases remain the offline fallback.
+10. **Cloud upload consent:** Shared GPU uploads now require a per-upload confirmation explaining that original audio leaves the device, is stored in the private workspace and is processed by the configured GPU worker.
 
 ## Remaining Phase 1 work
 
