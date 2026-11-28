@@ -4,8 +4,8 @@ import org.json.JSONObject
 import java.io.File
 
 /**
- * Applies user-chosen speaker names. Aliases are display overrides: the server's labels are never
- * changed, so a rename on this phone does not alter what the web app shows.
+ * Applies user-chosen speaker names. The display_name field is an app-owned override that
+ * preserves the diarisation provider's original label for reset and compatibility with other clients.
  */
 fun SpeakerTranscript.withAliases(aliases: Map<String, String>): SpeakerTranscript {
     if (aliases.isEmpty()) return this
@@ -15,6 +15,31 @@ fun SpeakerTranscript.withAliases(aliases: Map<String, String>): SpeakerTranscri
         turns = turns.map { it.copy(label = nameFor(it.speakerId, it.label)) },
         speakers = speakers.map { it.copy(label = nameFor(it.speakerId, it.label) ?: it.label) }
     )
+}
+
+/**
+ * Applies a speaker display-name override to the server's speakers JSON without changing provider
+ * labels or timing metadata. A blank name removes the override and restores the original label.
+ */
+object SpeakerLabelOverrides {
+    fun apply(speakers: JSONArray, speakerId: String, name: String): JSONArray {
+        val clean = name.trim().take(SpeakerAliasStore.MAX_NAME_LENGTH)
+        val result = JSONArray()
+        var found = false
+        for (index in 0 until speakers.length()) {
+            val original = speakers.optJSONObject(index) ?: continue
+            val row = JSONObject(original.toString())
+            if (row.optString("speaker_id") == speakerId) {
+                found = true
+                if (clean.isEmpty()) row.remove("display_name") else row.put("display_name", clean)
+            }
+            result.put(row)
+        }
+        if (!found && clean.isNotEmpty()) {
+            result.put(JSONObject().put("speaker_id", speakerId).put("display_name", clean))
+        }
+        return result
+    }
 }
 
 /**
