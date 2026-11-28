@@ -45,6 +45,32 @@ class SpeakerAliasesTest {
     }
 
     @Test
+    fun persistedDisplayNameOverridesProviderLabelWithoutChangingMetadata() {
+        val original = JSONArray().put(
+            JSONObject().put("speaker_id", "speaker_1")
+                .put("label", "Speaker 1").put("speaking_seconds", 12.5)
+        )
+        val renamed = SpeakerLabelOverrides.apply(original, "speaker_1", "Asha")
+        val row = renamed.getJSONObject(0)
+        assertEquals("Asha", row.getString("display_name"))
+        assertEquals("Speaker 1", row.getString("label"))
+        assertEquals(12.5, row.getDouble("speaking_seconds"), 0.0)
+        val parsed = SpeakerTranscripts.build(segments, renamed)
+        assertEquals("Asha", parsed.speakers.first().label)
+    }
+
+    @Test
+    fun clearingPersistedDisplayNameRestoresProviderLabel() {
+        val original = JSONArray().put(
+            JSONObject().put("speaker_id", "speaker_1")
+                .put("label", "Speaker 1").put("display_name", "Asha")
+        )
+        val cleared = SpeakerLabelOverrides.apply(original, "speaker_1", "")
+        assertFalse(cleared.getJSONObject(0).has("display_name"))
+        assertEquals("Speaker 1", SpeakerTranscripts.build(segments, cleared).speakers.first().label)
+    }
+
+    @Test
     fun storePersistsAcrossInstances() {
         val file = tempFile()
         SpeakerAliasStore(file).set("meeting:m1", "speaker_1", "  Asha  ")
