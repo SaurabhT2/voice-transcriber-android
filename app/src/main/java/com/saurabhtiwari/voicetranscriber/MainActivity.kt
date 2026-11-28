@@ -52,6 +52,7 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.UploadFile
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -70,6 +71,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
@@ -458,7 +460,8 @@ private fun MeetingWorkspaceScreen(
                     notesBusy = vm.notesBusy,
                     notesStatus = vm.meetingNotesStatus,
                     onLoadNotes = { vm.loadNotes() },
-                    onGenerateNotes = { vm.generateNotes() }
+                    onGenerateNotes = { vm.generateNotes() },
+                    onRenameMeeting = { vm.renameCurrentMeeting(it) }
                 )
             }
         }
@@ -869,9 +872,12 @@ private fun HistoryContent(
     notesBusy: Boolean,
     notesStatus: String,
     onLoadNotes: () -> Unit,
-    onGenerateNotes: () -> Unit
+    onGenerateNotes: () -> Unit,
+    onRenameMeeting: (String) -> Unit
 ) {
     val context = LocalContext.current
+    var showRenameDialog by remember(currentMeeting?.meetingId) { mutableStateOf(false) }
+    var titleDraft by remember(currentMeeting?.meetingId) { mutableStateOf(currentMeeting?.title.orEmpty()) }
     val completed = recordings.count { it.status == "succeeded" }
     val processing = recordings.count { it.status == "queued" || it.status == "processing" }
     val attention = recordings.count { it.status == "failed" || it.status == "upload_pending" || it.isLocalOnly }
@@ -936,9 +942,17 @@ private fun HistoryContent(
             item(key = "meeting") {
                 WorkspaceCard {
                     PanelHeading(Icons.Default.AudioFile, currentMeeting.title, "Transcript and meeting intelligence.", "MEETING DETAIL")
-                    OutlinedButton(
-                        onClick = {
-                            val text = buildString {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(
+                            onClick = {
+                                titleDraft = currentMeeting.title
+                                showRenameDialog = true
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) { Text("Rename") }
+                        OutlinedButton(
+                            onClick = {
+                                val text = buildString {
                                 appendLine("# ${currentMeeting.title}")
                                 appendLine()
                                 appendLine("## Transcript")
@@ -956,9 +970,10 @@ private fun HistoryContent(
                             }
                             context.startActivity(Intent.createChooser(send, "Share or export meeting"))
                         },
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text("Share / export")
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Share / export")
+                        }
                     }
                     TranscriptBody(currentMeeting)
                     Text(
@@ -1019,6 +1034,33 @@ private fun HistoryContent(
             }
         }
         item(key = "footer") { Footer() }
+    }
+    if (currentMeeting != null && showRenameDialog) {
+        AlertDialog(
+            onDismissRequest = { showRenameDialog = false },
+            title = { Text("Rename meeting") },
+            text = {
+                OutlinedTextField(
+                    value = titleDraft,
+                    onValueChange = { titleDraft = it.take(500) },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    label = { Text("Meeting title") }
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        onRenameMeeting(titleDraft)
+                        showRenameDialog = false
+                    },
+                    enabled = titleDraft.isNotBlank() && titleDraft.trim() != currentMeeting.title
+                ) { Text("Save") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showRenameDialog = false }) { Text("Cancel") }
+            }
+        )
     }
 }
 
