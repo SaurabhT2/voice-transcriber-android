@@ -32,7 +32,9 @@ val whisperAbis = (providers.gradleProperty("whisperAbis").orNull ?: "arm64-v8a"
 
 subprojects {
     if (name == "whisperlib") {
-        afterEvaluate {
+        // Configure only after the Android library plugin has created its dependency
+        // configurations and Android extension. This avoids racing project evaluation.
+        plugins.withId("com.android.library") {
             dependencies.add("implementation", "org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
             extensions.findByType(com.android.build.gradle.LibraryExtension::class.java)?.apply {
                 // The upstream whisper.android module pins NDK r25. Override it with r28,
