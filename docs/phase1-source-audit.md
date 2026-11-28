@@ -36,8 +36,8 @@ This audit examines the Android repository only. It does not certify the FastAPI
 | P1-20 | Search within current transcript | No search control in original `TranscriptBody` | Implemented in this branch: case-insensitive search over transcript sentences/attributed turns |
 | P1-21 | Rename/delete meeting and associated data | No rename/delete action in `HistoryContent` or `MeetingViewModel`; no corresponding method in `WorkspaceBackend` | Pending; deletion must be designed against actual FK/storage cascade and RLS behaviour |
 | P1-22 | Basic sharing of meeting notes | No share action in original detail view | Implemented in this branch: Android Sharesheet shares transcript and available notes |
-| P1-23 | Export transcript and notes | No export action in original detail view | Partially implemented: Sharesheet export handoff in Markdown-compatible text; no durable file writer yet |
-| P1-24 | Markdown/PDF and structured JSON export | No format-specific export pipeline found | Partially implemented: Markdown-compatible share payload; standalone PDF and JSON export pending |
+| P1-23 | Export transcript and notes | No export action in original detail view | Partially implemented: Sharesheet export handoff in Markdown-compatible text and structured JSON payload; no durable file writer yet |
+| P1-24 | Markdown/PDF and structured JSON export | No format-specific export pipeline found | Partially implemented: Markdown-compatible and structured JSON Sharesheet payloads; standalone PDF export and durable file export pending |
 | P1-25 | Local-only processing mode | `LocalTranscriber.kt`, `ViewModels.kt`, UI copy in `MainActivity.kt`; README says audio stays on device | Implemented; verify no audio network call in local mode |
 | P1-26 | Optional shared-GPU processing | UI offers Local/Shared GPU mode; explicit upload button; `startSharedGpuTranscription` | Implemented explicit user-initiated path; verify consent copy and backend behaviour |
 | P1-27 | Optional cloud processing with clear consent | Shared GPU is opt-in through explicit mode selection and upload action; no separate cloud provider path | Partial: explicit upload action exists; a dedicated cloud-processing consent/data-flow UX is not established |
@@ -49,7 +49,7 @@ This audit examines the Android repository only. It does not certify the FastAPI
 
 1. Added transcript search to `TranscriptBody`: case-insensitive filtering for plain transcript sentences and speaker-attributed turns, plus a no-match state.
 2. Expanded `NotesContent` to render open questions, risks/blockers and next steps in addition to summary, key points, decisions and action items.
-3. Added a Share / export action on the opened meeting detail. It sends the transcript and any currently loaded notes through Android's Sharesheet as Markdown-compatible text.
+3. Added Share / export and JSON export actions on the opened meeting detail. Markdown-compatible text includes transcript and any currently loaded notes; JSON includes meeting ID, title, transcript, notes and creation timestamp.
 
 ## Remaining Phase 1 work
 
@@ -60,7 +60,7 @@ This audit examines the Android repository only. It does not certify the FastAPI
 - P1-19: active transcript segment synchronisation/highlighting.
 - P1-21: rename is implemented with owner_id filtering and RLS; delete remains blocked on coordinated transcription-job and Storage-object cleanup.
 - P1-23: durable export to a user-selected file.
-- P1-24: standalone Markdown, PDF and JSON exporters.
+- P1-24: standalone PDF exporter and durable file output (Markdown and JSON can currently be shared through the Android Sharesheet).
 
 ### Backend/security acceptance required
 - P1-03: offline audio upload recovery (not just transcript sync).
