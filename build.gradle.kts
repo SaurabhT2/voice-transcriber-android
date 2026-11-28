@@ -37,8 +37,7 @@ subprojects {
         plugins.withId("com.android.library") {
             dependencies.add("implementation", "org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
             extensions.findByType(com.android.build.gradle.LibraryExtension::class.java)?.apply {
-                // The upstream whisper.android module pins NDK r25. Override it with r28,
-                // whose packaged native runtimes (including libomp.so) support 16 KB pages.
+                // Use a current NDK for 16 KB page-size compatibility.
                 ndkVersion = "28.0.13004108"
                 defaultConfig {
                     // Build only the ABIs we ship (the library would otherwise build all of them).
@@ -50,8 +49,13 @@ subprojects {
                     // native libraries to be aligned for them.
                     externalNativeBuild {
                         cmake {
-                            // Align newly linked Whisper/GGML shared libraries for 16 KB pages.
-                            arguments("-DCMAKE_SHARED_LINKER_FLAGS=-Wl,-z,max-page-size=16384")
+                            // Align Whisper/GGML shared libraries for 16 KB pages. Disable GGML OpenMP:
+                            // its bundled libomp.so is currently linked with 4 KB LOAD alignment.
+                            // GGML CPU inference remains enabled; only OpenMP parallelism is disabled.
+                            arguments(
+                                "-DGGML_OPENMP=OFF",
+                                "-DCMAKE_SHARED_LINKER_FLAGS=-Wl,-z,max-page-size=16384"
+                            )
                         }
                     }
                 }
