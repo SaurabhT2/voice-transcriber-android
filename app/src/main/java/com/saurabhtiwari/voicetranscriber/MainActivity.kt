@@ -101,17 +101,17 @@ import kotlinx.coroutines.launch
 import org.json.JSONObject
 
 private val Canvas = Color(0xFFF7F9FC)
-private val Ink = Color(0xFF18212F)
-private val Muted = Color(0xFF7B8798)
-private val Border = Color(0xFFE8EDF3)
-private val Blue = Color(0xFF3269E8)
-private val BlueTint = Color(0xFFEDF2FF)
+internal val Ink = Color(0xFF18212F)
+internal val Muted = Color(0xFF7B8798)
+internal val Border = Color(0xFFE8EDF3)
+internal val Blue = Color(0xFF3269E8)
+internal val BlueTint = Color(0xFFEDF2FF)
 private val Violet = Color(0xFF7458D8)
 private val VioletTint = Color(0xFFF2EFFF)
-private val Green = Color(0xFF16845D)
+internal val Green = Color(0xFF16845D)
 private val GreenTint = Color(0xFFEAF7F1)
-private val Amber = Color(0xFFAD761D)
-private val AmberTint = Color(0xFFFFF7E8)
+internal val Amber = Color(0xFFAD761D)
+internal val AmberTint = Color(0xFFFFF7E8)
 
 private val WorkspaceColors = lightColorScheme(
     primary = Blue,

@@ -43,16 +43,7 @@ object SpeakerTranscripts {
             reportedSeconds[id] = row.optDouble("speaking_seconds", 0.0).coerceAtLeast(0.0)
         }
 
-        class Piece(val speakerId: String?, val start: Double, val end: Double, val text: String)
-        val pieces = ArrayList<Piece>()
-        for (i in 0 until segments.length()) {
-            val row = segments.optJSONObject(i) ?: continue
-            val text = row.optString("text").trim()
-            if (text.isEmpty()) continue
-            val start = row.optDouble("start", 0.0).let { if (it.isNaN()) 0.0 else it.coerceAtLeast(0.0) }
-            val end = row.optDouble("end", start).let { if (it.isNaN()) start else it.coerceAtLeast(start) }
-            pieces.add(Piece(row.optNullableString("speaker_id"), start, end, text))
-        }
+        val pieces = readPieces(segments)
 
         // Colours follow first appearance in the conversation, not the order of the speakers array.
         val colorOf = LinkedHashMap<String, Int>()
@@ -101,6 +92,29 @@ object SpeakerTranscripts {
         }
         return SpeakerTranscript(turns, stats)
     }
+
+    private class Piece(val speakerId: String?, val start: Double, val end: Double, val text: String)
+
+    /** Tolerant segment parsing: blank text is dropped, bad or negative times are clamped. */
+    private fun readPieces(segments: JSONArray): List<Piece> {
+        val pieces = ArrayList<Piece>()
+        for (i in 0 until segments.length()) {
+            val row = segments.optJSONObject(i) ?: continue
+            val text = row.optString("text").trim()
+            if (text.isEmpty()) continue
+            val start = row.optDouble("start", 0.0).let { if (it.isNaN()) 0.0 else it.coerceAtLeast(0.0) }
+            val end = row.optDouble("end", start).let { if (it.isNaN()) start else it.coerceAtLeast(start) }
+            pieces.add(Piece(row.optNullableString("speaker_id"), start, end, text))
+        }
+        return pieces
+    }
+
+    /**
+     * One timestamped line per segment, never merged. Shown when the transcript has no speaker
+     * labels, so every line can still be tapped to jump to that moment in the audio.
+     */
+    fun segmentLines(segments: JSONArray): List<TranscriptTurn> =
+        readPieces(segments).map { TranscriptTurn(null, null, -1, it.start, it.text) }
 
     /** `speaker_3` -> "Speaker 3"; anything else is shown as it came. */
     fun defaultLabel(speakerId: String): String {

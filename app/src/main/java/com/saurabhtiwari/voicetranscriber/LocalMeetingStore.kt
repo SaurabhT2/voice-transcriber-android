@@ -78,6 +78,58 @@ class LocalMeetingStore(private val directory: File) {
     fun pendingSync(ownerId: String): List<LocalMeetingRecord> =
         list(ownerId).filter { it.meetingId == null }
 
+    @Synchronized
+    fun find(ownerId: String, eventId: String): LocalMeetingRecord? =
+        records().firstOrNull { it.ownerId == ownerId && it.eventId == eventId }
+
+    /** Renames a stored transcript. Returns false when it does not exist or [title] is blank. */
+    @Synchronized
+    fun rename(ownerId: String, eventId: String, title: String): Boolean {
+        val clean = title.trim()
+        if (clean.isEmpty()) return false
+        return replace(ownerId, eventId) { it.copy(title = clean) }
+    }
+
+    /**
+     * Corrects the text of a transcript that has not synced yet, so the corrected text is what gets
+     * uploaded. Once synced the server copy cannot be updated from here, so edits are refused.
+     */
+    @Synchronized
+    fun updateTranscript(ownerId: String, eventId: String, transcript: String): Boolean {
+        if (transcript.isBlank()) return false
+        return replace(ownerId, eventId) { if (it.meetingId == null) it.copy(transcript = transcript) else null }
+    }
+
+    /** Deletes one stored transcript. Returns false when it does not exist. */
+    @Synchronized
+    fun delete(ownerId: String, eventId: String): Boolean {
+        val all = records()
+        val index = all.indexOfFirst { it.ownerId == ownerId && it.eventId == eventId }
+        if (index < 0) return false
+        File(directory, eventId + ".json").delete()
+        all.removeAt(index)
+        return true
+    }
+
+    /** Deletes the on-device copies of a synced meeting; returns them so callers can clean up linked audio. */
+    @Synchronized
+    fun deleteByMeetingId(ownerId: String, meetingId: String): List<LocalMeetingRecord> {
+        val matches = records().filter { it.ownerId == ownerId && it.meetingId == meetingId }
+        matches.forEach { delete(ownerId, it.eventId) }
+        return matches
+    }
+
+    /** Applies [change] to one record and persists it; [change] returns null to refuse. */
+    private fun replace(ownerId: String, eventId: String, change: (LocalMeetingRecord) -> LocalMeetingRecord?): Boolean {
+        val all = records()
+        val index = all.indexOfFirst { it.ownerId == ownerId && it.eventId == eventId }
+        if (index < 0) return false
+        val updated = change(all[index]) ?: return false
+        write(updated)
+        all[index] = updated
+        return true
+    }
+
     private fun records(): MutableList<LocalMeetingRecord> {
         cache?.let { return it }
         val loaded = directory.listFiles { file -> file.isFile && file.extension == "json" }

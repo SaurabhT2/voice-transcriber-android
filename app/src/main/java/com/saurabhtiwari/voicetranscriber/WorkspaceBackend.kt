@@ -42,44 +42,12 @@ object WorkspaceConfig {
     const val AUTH_REDIRECT_URI = "meetingworkspace://auth/callback"
 }
 
-data class RecordingItem(
-    val id: String,
-    val title: String,
-    val status: String,
-    val source: String,
-    val createdAt: String,
-    val meetingId: String?,
-    val transcriptId: String?,
-    val errorCode: String? = null,
-    val isLocalOnly: Boolean = false
-)
-
 /** Transcript of one finished live chunk. [failed] chunks carry no text. */
 data class LiveTextChunk(
     val index: Int,
     val startSeconds: Double,
     val text: String,
     val failed: Boolean
-)
-
-data class CloudJob(
-    val jobId: String,
-    val status: String,
-    val meetingId: String?,
-    val transcriptId: String?,
-    val errorCode: String?
-)
-
-data class MeetingDetail(
-    val meetingId: String,
-    val title: String,
-    val source: String,
-    val transcript: String,
-    val language: String?,
-    val model: String?,
-    val segments: JSONArray,
-    val speakers: JSONArray,
-    val createdAt: String
 )
 
 /** AES-GCM encryption with a non-exportable Android Keystore key. */
