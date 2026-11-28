@@ -871,6 +871,7 @@ private fun HistoryContent(
     onLoadNotes: () -> Unit,
     onGenerateNotes: () -> Unit
 ) {
+    val context = LocalContext.current
     val completed = recordings.count { it.status == "succeeded" }
     val processing = recordings.count { it.status == "queued" || it.status == "processing" }
     val attention = recordings.count { it.status == "failed" || it.status == "upload_pending" || it.isLocalOnly }
@@ -935,6 +936,30 @@ private fun HistoryContent(
             item(key = "meeting") {
                 WorkspaceCard {
                     PanelHeading(Icons.Default.AudioFile, currentMeeting.title, "Transcript and meeting intelligence.", "MEETING DETAIL")
+                    OutlinedButton(
+                        onClick = {
+                            val text = buildString {
+                                appendLine("# ${currentMeeting.title}")
+                                appendLine()
+                                appendLine("## Transcript")
+                                appendLine(currentMeeting.transcript)
+                                meetingNotes?.let {
+                                    appendLine()
+                                    appendLine("## Meeting notes")
+                                    appendLine(it.toString(2))
+                                }
+                            }
+                            val send = Intent(Intent.ACTION_SEND).apply {
+                                type = "text/markdown"
+                                putExtra(Intent.EXTRA_SUBJECT, currentMeeting.title)
+                                putExtra(Intent.EXTRA_TEXT, text)
+                            }
+                            context.startActivity(Intent.createChooser(send, "Share or export meeting"))
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Share / export")
+                    }
                     TranscriptBody(currentMeeting)
                     Text(
                         listOfNotNull(currentMeeting.source, currentMeeting.language, currentMeeting.model).joinToString(" · "),
