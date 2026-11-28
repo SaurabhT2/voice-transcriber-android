@@ -58,7 +58,7 @@ This audit examines the Android repository only. It does not certify the FastAPI
 - P1-17: audio player in meeting detail.
 - P1-18: timestamp-to-audio seek.
 - P1-19: active transcript segment synchronisation/highlighting.
-- P1-21: rename/delete, after confirming server endpoint and storage/foreign-key cascade semantics.
+- P1-21: rename is implemented with owner_id filtering and RLS; delete remains blocked on coordinated transcription-job and Storage-object cleanup.
 - P1-23: durable export to a user-selected file.
 - P1-24: standalone Markdown, PDF and JSON exporters.
 
