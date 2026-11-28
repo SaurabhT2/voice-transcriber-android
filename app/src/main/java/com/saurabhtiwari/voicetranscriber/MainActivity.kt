@@ -514,6 +514,7 @@ private fun OverviewContent(
     onTranscribe: () -> Unit,
     onHistory: () -> Unit
 ) {
+    var showCloudConsent by remember { mutableStateOf(false) }
     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text("Good to see you.", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = Ink)
@@ -842,7 +843,7 @@ private fun TranscribeContent(
                 }
             } else {
                 Button(
-                    onClick = onCloudTranscribe,
+                    onClick = { showCloudConsent = true },
                     enabled = canTranscribe && !cloudBusy,
                     modifier = Modifier.fillMaxWidth().height(46.dp),
                     shape = RoundedCornerShape(9.dp)
@@ -852,7 +853,7 @@ private fun TranscribeContent(
                     Spacer(Modifier.width(7.dp))
                     Text(if (cloudBusy) "Uploading and processing…" else "Upload and transcribe")
                 }
-                Text("Audio is sent only after you choose Shared GPU and start the upload.", color = Muted, style = MaterialTheme.typography.labelSmall)
+                Text("Selecting Shared GPU does not upload anything. You will review the data transfer before each upload.", color = Muted, style = MaterialTheme.typography.labelSmall)
                 if (cloudBusy) {
                     OutlinedButton(onClick = onCancelCloud, modifier = Modifier.fillMaxWidth()) { Text("Cancel upload") }
                 }
@@ -872,6 +873,29 @@ private fun TranscribeContent(
                 Text(localTranscript, style = MaterialTheme.typography.bodyMedium, color = Ink)
             }
         }
+    }
+
+    if (showCloudConsent) {
+        AlertDialog(
+            onDismissRequest = { showCloudConsent = false },
+            title = { Text("Upload audio to Shared GPU?") },
+            text = {
+                Text(
+                    "To continue, the selected audio recording will be uploaded to your private Meeting Intelligence workspace " +
+                        "and processed by your configured GPU worker. This sends the original audio off this phone; it is not local-only processing. " +
+                        "Your transcript and meeting metadata will also be stored in your workspace. Choose Upload only if you agree to this transfer."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showCloudConsent = false
+                    onCloudTranscribe()
+                }) { Text("Upload audio") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showCloudConsent = false }) { Text("Keep on device") }
+            }
+        )
     }
 }
 
