@@ -56,7 +56,7 @@ Phase 2 library tools, stacked on top (this integration):
 2. **Playback:** `AudioPlayerController` (platform `MediaPlayer`), transcript-to-audio links (`AudioLinkStore`), tap a transcript line or timestamped note to seek, active line highlighted.
 3. **Find and search:** in-transcript find now highlights matches and can show only matching lines (it replaces the earlier filter-only view); library search covers titles, on-device transcript text and workspace transcripts.
 4. **Export:** one menu with share as text, copy as Markdown, save Markdown file, share as JSON and save JSON file. Exports include speaker names, timestamps and every notes section. The earlier JSON keys are kept.
-5. **Rename, delete, edit:** rename (synced and on-device), delete with job and local cleanup, remove failed jobs, edit unsynced on-device text, device-local speaker names. This replaces the earlier rename, which could not detect a refused update.
+5. **Rename, delete, edit:** rename (synced and on-device), delete with job and local cleanup, remove failed jobs, edit unsynced on-device text, speaker display names persisted in the synced transcript's `speakers` JSON (with device-local fallback). This replaces the earlier rename, which could not detect a refused update.
 6. **Cancel** for shared-GPU uploads and queued or running jobs.
 7. Notes sections accept both object and plain-string entries, and the legacy `risks` key.
 
@@ -66,7 +66,7 @@ Phase 2 library tools, stacked on top (this integration):
 - Device validation of everything marked "Implemented" above; the Phase 2 work was syntax-checked and its pure logic unit-tested, but not built or run on a device.
 - P1-21: delete of the audio object in Storage (needs an API endpoint, together with live-chunk cleanup).
 - P1-24: standalone PDF exporter.
-- Editing server-side transcripts and persisting speaker names server-side (both need endpoints).
+- Editing server-side transcript text still needs a dedicated update operation. Speaker display names now persist in the existing owner-scoped `transcripts.speakers` JSON using a separate `display_name` field; provider labels and diarisation metadata are preserved.
 
 ### Backend/security acceptance required
 - P1-03: offline audio upload recovery (not just transcript sync).
