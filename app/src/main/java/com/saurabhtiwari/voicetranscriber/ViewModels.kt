@@ -717,12 +717,23 @@ class MeetingViewModel(app: Application, private val ownerId: String) : AndroidV
 
     fun renameSpeaker(speakerId: String, name: String) {
         val key = currentKey() ?: return
+        val meeting = currentMeeting
         viewModelScope.launch {
             val updated = withContext(Dispatchers.IO) {
                 speakerAliasStore.set(key, speakerId, name)
                 speakerAliasStore.get(key)
             }
             if (currentKey() == key) speakerAliases = updated
+            if (meeting != null) {
+                try {
+                    backend.setSpeakerDisplayName(meeting.meetingId, speakerId, name)
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Exception) {
+                    errorMessage = "Name saved on this phone, but workspace sync failed: " +
+                        (error.message ?: "Please try again.")
+                }
+            }
         }
     }
 
