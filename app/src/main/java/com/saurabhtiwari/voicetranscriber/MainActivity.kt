@@ -1008,13 +1008,33 @@ private fun TranscriptBody(meeting: MeetingDetail) {
     val parsed = remember(meeting.meetingId, meeting.segments, meeting.speakers) {
         SpeakerTranscripts.build(meeting.segments, meeting.speakers)
     }
+    var query by remember(meeting.meetingId) { mutableStateOf("") }
+    val normalizedQuery = query.trim()
+    OutlinedTextField(
+        value = query,
+        onValueChange = { query = it },
+        modifier = Modifier.fillMaxWidth(),
+        singleLine = true,
+        label = { Text("Search this transcript") },
+        placeholder = { Text("Find a word or phrase") }
+    )
     if (!parsed.hasSpeakers) {
+        val transcript = meeting.transcript.ifBlank { "Transcript unavailable." }
+        val visible = if (normalizedQuery.isBlank()) transcript else transcript
+            .split(Regex("(?<=[.!?])\\s+"))
+            .filter { it.contains(normalizedQuery, ignoreCase = true) }
+            .joinToString("\\n\\n")
         Text(
-            meeting.transcript.ifBlank { "Transcript unavailable." },
+            if (normalizedQuery.isNotBlank() && visible.isBlank()) "No matching transcript text." else visible,
             color = Ink,
             style = MaterialTheme.typography.bodyMedium
         )
         return
+    }
+    val visibleTurns = if (normalizedQuery.isBlank()) parsed.turns else
+        parsed.turns.filter { it.text.contains(normalizedQuery, ignoreCase = true) || (it.label?.contains(normalizedQuery, true) == true) }
+    if (normalizedQuery.isNotBlank() && visibleTurns.isEmpty()) {
+        Text("No matching transcript text.", color = Muted, style = MaterialTheme.typography.bodySmall)
     }
     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -1036,7 +1056,7 @@ private fun TranscriptBody(meeting: MeetingDetail) {
                 )
             }
         }
-        parsed.turns.forEach { turn ->
+        visibleTurns.forEach { turn ->
             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -1106,7 +1126,10 @@ private fun NotesContent(notes: JSONObject) {
     val groups = listOf(
         "Key points" to notes.optJSONArray("key_points"),
         "Decisions" to notes.optJSONArray("decisions"),
-        "Action items" to notes.optJSONArray("action_items")
+        "Action items" to notes.optJSONArray("action_items"),
+        "Open questions" to notes.optJSONArray("open_questions"),
+        "Risks and blockers" to (notes.optJSONArray("risks_and_blockers") ?: notes.optJSONArray("risks")),
+        "Next steps" to notes.optJSONArray("next_steps")
     )
     groups.forEach { (title, values) ->
         if (values != null && values.length() > 0) {
