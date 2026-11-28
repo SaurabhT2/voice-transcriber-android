@@ -407,6 +407,45 @@ class WorkspaceBackend(context: Context) {
         requestJson("GET", WorkspaceConfig.API_BASE_URL + "/api/v1/meetings/$meetingId", bearerToken = token)
     }.toMeetingDetail()
 
+    /**
+     * Persists a speaker display-name override in the transcript's speakers JSON.
+     * The provider's original label and all diarisation metadata remain intact in the row.
+     */
+    suspend fun setSpeakerDisplayName(meetingId: String, speakerId: String, name: String) {
+        val userId = sessions.active()?.userId ?: throw SessionExpiredException()
+        require(meetingId.isNotBlank() && speakerId.isNotBlank()) { "A meeting and speaker are required." }
+        val lookupUrl = PostgrestUrl.build(
+            WorkspaceConfig.SUPABASE_URL + "/rest/v1/transcripts",
+            "select" to "id,speakers",
+            "meeting_id" to "eq.$meetingId",
+            "owner_id" to "eq.$userId",
+            "limit" to "1"
+        )
+        val rows = JSONArray(authed { token ->
+            requestText("GET", lookupUrl, publicHeaders, bearerToken = token)
+        })
+        val transcriptRow = rows.optJSONObject(0)
+            ?: throw IOException("The transcript could not be found or is not accessible.")
+        val transcriptId = transcriptRow.getString("id")
+        val updatedSpeakers = SpeakerLabelOverrides.apply(
+            transcriptRow.optJSONArray("speakers") ?: JSONArray(),
+            speakerId,
+            name
+        )
+        val updateUrl = PostgrestUrl.build(
+            WorkspaceConfig.SUPABASE_URL + "/rest/v1/transcripts",
+            "id" to "eq.$transcriptId",
+            "owner_id" to "eq.$userId"
+        )
+        val updated = authed { token ->
+            requestText(
+                "PATCH", updateUrl, publicHeaders + RETURN_ROWS, token,
+                JSONObject().put("speakers", updatedSpeakers).toString()
+            )
+        }
+        if (rowCount(updated) == 0) throw IOException("The speaker name could not be saved to your workspace.")
+    }
+
     // ---- rename / delete / search (Supabase Data API; owner-scoped by row-level security) ----------
 
     /** Renames a meeting. @throws IOException if the server did not change a row (e.g. not permitted). */
