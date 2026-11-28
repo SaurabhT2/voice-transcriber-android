@@ -1048,7 +1048,7 @@ private fun TranscriptBody(meeting: MeetingDetail) {
         val visible = if (normalizedQuery.isBlank()) transcript else transcript
             .split(Regex("(?<=[.!?])\\s+"))
             .filter { it.contains(normalizedQuery, ignoreCase = true) }
-            .joinToString("\\n\\n")
+            .joinToString("\n\n")
         Text(
             if (normalizedQuery.isNotBlank() && visible.isBlank()) "No matching transcript text." else visible,
             color = Ink,
